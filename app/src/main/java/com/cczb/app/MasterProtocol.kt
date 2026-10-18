@@ -1,0 +1,249 @@
+package com.cczb.app
+
+import java.io.ByteArrayOutputStream
+
+/** TX notifications are a byte stream. Decode only after a complete newline. */
+class MasterLineAssembler(private val maxBytes: Int = 191) {
+    private val bytes = ByteArrayOutputStream()
+    private var discarding = false
+    fun reset() { bytes.reset(); discarding = false }
+    fun accept(packet: ByteArray): List<String> = buildList {
+        packet.forEach { byte ->
+            if (byte == 10.toByte()) {
+                if (!discarding && bytes.size() > 0) add(bytes.toString("UTF-8").trimEnd('\r'))
+                reset()
+            } else if (!discarding) {
+                if (bytes.size() >= maxBytes) { bytes.reset(); discarding = true }
+                else bytes.write(byte.toInt())
+            }
+        }
+    }
+}
+
+data class MasterJobKey(val epoch: Long, val id: Long) {
+    override fun toString() = "$epoch:$id"
+}
+
+/**
+ * The slave does not expose a phone-facing GAP name. Its Mesh PB-ADV UUID
+ * carries the same two identity bytes used by the firmware name
+ * PUMP_SLAVE_xxxx (UUID bytes 8..9, represented by hex characters 16..19).
+ */
+fun slaveDisplayName(uuid: String): String {
+    if (uuid.length == 32 && uuid.startsWith("dddd504d", ignoreCase = true)) {
+        return "PUMP_SLAVE_${uuid.substring(16, 20).uppercase()}"
+    }
+    return "从机 ${uuid.takeLast(4).uppercase()}"
+}
+
+sealed interface MasterMessage {
+    data class InventoryBegin(val epoch: Long, val request: Long, val count: Int) : MasterMessage
+    data class InventoryNode(val epoch: Long, val request: Long, val node: MasterSlave) : MasterMessage
+    data class InventoryEnd(val epoch: Long, val request: Long, val count: Int) : MasterMessage
+    data class Mesh(val epoch: Long, val request: Long, val state: MasterMeshState) : MasterMessage
+    data class Candidate(val epoch: Long, val scan: Long, val uuid: String) : MasterMessage
+    data class Hello(val role: String, val address: Long, val master: Long, val epoch: Long,
+                     val mesh: Boolean, val commissioned: Boolean, val fault: String) : MasterMessage {
+        val ready get() = role == "PUMP_MASTER" && address == master && address in 1..0x7fff &&
+            epoch > 0 && mesh && commissioned && fault == "NONE"
+    }
+    data class Report(val client: String, val seq: Long, val reply: String, val job: MasterJobKey?,
+                      val phase: Int, val mask: Long, val done: Long, val failed: Long, val unknown: Long) : MasterMessage
+    data class Volume(val job: MasterJobKey, val ml: Long, val measured: Long) : MasterMessage
+    data class Flow(val job: MasterJobKey, val address: Long, val ml: Long, val phase: String) : MasterMessage
+    /** This is a control output snapshot, not feedback from a running sensor. */
+    data class Local(val pumpCommand: Boolean, val phase: Int, val fault: String,
+                     val testSupported: Boolean = false, val testActive: Boolean = false,
+                     val testMs: Long = 0, val testClient: String? = null, val testSeq: Long = 0,
+                     val pumpReady: Boolean = false) : MasterMessage
+    data class PumpTest(val client: String, val seq: Long, val epoch: Long, val reply: String, val state: String, val op: String) : MasterMessage
+    data class PumpPwm(val epoch: Long, val revision: Long, val level: Int, val duty: Int,
+                       val hz: Long, val output: Boolean, val reply: String,
+                       val manualTest: Boolean = false, val dryMaxMs: Long = 0,
+                       val dryActive: Boolean = false) : MasterMessage {
+        fun command(newLevel: Int) = "pump-speed $epoch $revision $newLevel"
+    }
+}
+
+data class MasterPumpTest(val client: String, val seq: Long, val epoch: Long, val durationMs: Long,
+                          val outcome: MasterOutcome = MasterOutcome.PENDING, val dryRun: Boolean = false) {
+    val unresolved get() = outcome == MasterOutcome.PENDING || outcome == MasterOutcome.ACCEPTED
+    fun command() = "${if (dryRun) "pump-dry-test" else "pump-test"} $client $seq $epoch $durationMs"
+    fun stop() = "pump-test-stop $client $seq $epoch"
+    fun query() = "pump-test-query $client $seq $epoch"
+    fun reconcile(reply: MasterMessage.PumpTest): MasterPumpTest {
+        if (reply.client != client || reply.seq != seq || reply.epoch != epoch || !unresolved) return this
+        return when {
+            reply.state == "RUNNING" -> copy(outcome = MasterOutcome.ACCEPTED)
+            reply.state == "STOPPED" -> copy(outcome = MasterOutcome.FINISHED)
+            reply.op == "START" && reply.reply in setOf("BUSY", "INVALID", "NOT_READY", "STORAGE", "UNAUTHORIZED", "CAPACITY", "CONFLICT", "STALE") &&
+                outcome == MasterOutcome.PENDING -> copy(outcome = MasterOutcome.REJECTED)
+            else -> this
+        }
+    }
+}
+
+enum class MasterOutcome { PENDING, ACCEPTED, REJECTED, FINISHED }
+data class MasterTask(
+    val client: String, val seq: Long, val epoch: Long, val mask: Long, val ml: Long, val maxMs: Long,
+    val outcome: MasterOutcome = MasterOutcome.PENDING, val job: MasterJobKey? = null
+) {
+    val unresolved get() = outcome == MasterOutcome.PENDING || outcome == MasterOutcome.ACCEPTED
+    fun command() = "start $client $seq $epoch ${mask.toString(16).padStart(8, '0')} $ml $maxMs"
+    fun query() = "query $client $seq"
+
+    /** A transport write is never acceptance. Unknown query results stay unresolved. */
+    fun reconcile(report: MasterMessage.Report, directStartReply: Boolean): MasterTask {
+        if (report.client != client || report.seq != seq) return this
+        if (report.reply == "OK" && report.job != null && report.job.epoch == epoch &&
+            report.mask == mask && (job == null || job == report.job)) {
+            if (!unresolved) return this
+            return copy(job = report.job, outcome = if (report.phase >= 6) MasterOutcome.FINISHED else MasterOutcome.ACCEPTED)
+        }
+        if (directStartReply && outcome == MasterOutcome.PENDING && report.job == null &&
+            report.reply in setOf("BUSY", "INVALID", "STALE", "NOT_READY", "STORAGE", "UNAUTHORIZED", "OFFLINE", "CAPACITY")) {
+            return copy(outcome = MasterOutcome.REJECTED)
+        }
+        return this
+    }
+}
+
+object MasterProtocol {
+    private const val U32 = 0xffff_ffffL
+    private val replies = setOf("OK", "BUSY", "INVALID", "STALE", "CONFLICT", "NOT_READY",
+        "STORAGE", "UNAUTHORIZED", "OFFLINE", "CAPACITY", "PENDING", "UNKNOWN")
+    private val hex = Regex("[0-9a-fA-F]{1,16}")
+    fun client(value: String): String? = value.takeIf { hex.matches(it) }
+        ?.lowercase()?.trimStart('0')?.takeIf { it.isNotEmpty() }
+    private fun uint(value: String?, max: Long = U32): Long? = value?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
+        ?.toLongOrNull()?.takeIf { it in 0..max }
+    private fun mask(value: String?): Long? = value?.takeIf { Regex("[0-9a-fA-F]{1,8}").matches(it) }?.toLongOrNull(16)
+    private fun key(value: String?): MasterJobKey? {
+        val pieces = value?.split(':') ?: return null
+        if (pieces.size != 2) return null
+        val epoch = uint(pieces[0]) ?: return null
+        val id = uint(pieces[1]) ?: return null
+        return if (epoch > 0 && id > 0) MasterJobKey(epoch, id) else null
+    }
+    fun parse(line: String): MasterMessage? {
+        val parts = line.trim().split(' ')
+        val fields = mutableMapOf<String, String>()
+        for (part in parts.drop(1)) {
+            val split = part.split('=', limit = 2)
+            if (split.size != 2 || fields.put(split[0], split[1]) != null) return null
+        }
+        fun n(name: String) = uint(fields[name])
+        fun h(name: String) = mask(fields[name])
+        fun flag(name: String) = n(name)?.takeIf { it <= 1 }
+        return when (parts.firstOrNull()) {
+            "INV_BEGIN", "INV_END" -> {
+                val epoch = n("epoch")?.takeIf { it > 0 } ?: return null
+                val req = n("req")?.takeIf { it > 0 } ?: return null
+                val count = n("count")?.takeIf { it <= 32 }?.toInt() ?: return null
+                if (parts[0] == "INV_BEGIN") MasterMessage.InventoryBegin(epoch, req, count)
+                else MasterMessage.InventoryEnd(epoch, req, count)
+            }
+            "INV_NODE" -> MasterMessage.InventoryNode(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("req")?.takeIf { it > 0 } ?: return null,
+                MasterSlave(n("slot")?.takeIf { it <= 32 }?.toInt() ?: return null,
+                    h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
+                    (flag("online") ?: return null) == 1L, (flag("commissioned") ?: return null) == 1L))
+            "MESH" -> MasterMessage.Mesh(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("req")?.takeIf { it > 0 } ?: return null,
+                MasterMeshState(fields["phase"]?.takeIf { it.matches(Regex("[A-Z_]{1,24}")) } ?: return null,
+                    (flag("busy") ?: return null) == 1L, (flag("capable") ?: return null) == 1L,
+                    fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: return null,
+                    n("op") ?: return null, n("scan") ?: return null,
+                    n("found")?.takeIf { it <= 8 }?.toInt() ?: return null,
+                    h("target")?.takeIf { it <= 0x7fff } ?: return null))
+            "CAND" -> MasterMessage.Candidate(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("scan")?.takeIf { it > 0 } ?: return null,
+                fields["uuid"]?.takeIf { it.matches(Regex("[0-9a-fA-F]{32}")) }?.lowercase() ?: return null)
+            "HELLO" -> MasterMessage.Hello(fields["role"] ?: return null, h("addr") ?: return null,
+                h("master") ?: return null, n("epoch") ?: return null,
+                (flag("mesh") ?: return null) == 1L,
+                (flag("commissioned") ?: return null) == 1L,
+                fields["pump_fault"] ?: return null)
+            "LOCAL" -> {
+                val supported = fields["test_supported"]?.let { (flag("test_supported") ?: return null) == 1L } ?: false
+                val active = if (supported) (flag("test_active") ?: return null) == 1L else false
+                val remaining = if (supported) n("test_ms")?.takeIf { it <= 10000 } ?: return null else 0L
+                val testClient = fields["test_client"]?.let(::client)
+                val testSeq = if (supported) n("test_seq") ?: return null else 0L
+                val output = (flag("pump_command") ?: return null) == 1L
+                val phase = n("pump_phase")?.takeIf { it in setOf(0L, 2L, 4L) }?.toInt() ?: return null
+                if (active && (!output || phase != 2 || testClient == null || testSeq == 0L)) return null
+                MasterMessage.Local(output, phase, fields["fault"]?.takeIf { it.isNotBlank() } ?: return null,
+                    supported, active, remaining, testClient, testSeq, if (supported) (flag("pump_ready") ?: return null) == 1L else false)
+            }
+            "PUMP_TEST" -> MasterMessage.PumpTest(client(fields["client"] ?: return null) ?: return null,
+                n("seq")?.takeIf { it > 0 } ?: return null, n("epoch")?.takeIf { it > 0 } ?: return null,
+                fields["reply"]?.takeIf { it in replies } ?: return null,
+                fields["state"]?.takeIf { it in setOf("UNKNOWN", "RUNNING", "STOPPED") } ?: return null,
+                fields["op"]?.takeIf { it in setOf("START", "STOP", "QUERY") } ?: return null)
+            "PUMP_PWM" -> {
+                val extended = listOf("test_manual", "dry_max_ms", "dry_active").any(fields::containsKey)
+                val manual = if (extended) (flag("test_manual") ?: return null) == 1L else false
+                val dryMax = if (extended) n("dry_max_ms")?.takeIf { it <= 3000 } ?: return null else 0L
+                val dryActive = if (extended) (flag("dry_active") ?: return null) == 1L else false
+                val output = (flag("output") ?: return null) == 1L
+                if ((!manual && dryMax != 0L) || dryActive && (!manual || dryMax == 0L || !output || n("level") != 1L)) return null
+                MasterMessage.PumpPwm(
+                n("epoch")?.takeIf { it > 0 } ?: return null, n("rev") ?: return null,
+                n("level")?.takeIf { it in 1..3 }?.toInt() ?: return null,
+                n("duty")?.takeIf { it in 1..100 }?.toInt() ?: return null,
+                n("hz")?.takeIf { it in 1..1_000_000 } ?: return null,
+                output, fields["reply"]?.takeIf { it in replies } ?: return null, manual, dryMax, dryActive)
+            }
+            "R" -> {
+                val reply = fields["reply"]?.takeIf { it in setOf("OK", "BUSY", "INVALID", "STALE", "CONFLICT", "NOT_READY",
+                    "STORAGE", "UNAUTHORIZED", "OFFLINE", "CAPACITY", "PENDING", "UNKNOWN") } ?: return null
+                val job = key(fields["job"])
+                if (job == null && fields["job"] != "0:0") return null
+                val selected = h("mask") ?: return null
+                val done = h("done") ?: return null
+                val failed = h("failed") ?: return null
+                val unknown = h("unknown") ?: return null
+                if ((done or failed or unknown) and selected.inv() != 0L) return null
+                MasterMessage.Report(client(fields["client"] ?: return null) ?: return null,
+                    n("seq")?.takeIf { it > 0 } ?: return null, reply, job,
+                    n("phase")?.takeIf { it <= 7 }?.toInt() ?: return null, selected, done, failed, unknown)
+            }
+            "V" -> MasterMessage.Volume(key(fields["job"]) ?: return null, n("total_ml") ?: return null, h("measured") ?: return null)
+            "FLOW" -> MasterMessage.Flow(key(fields["job"]) ?: return null,
+                h("addr")?.takeIf { it in 1..0x7fff } ?: return null, n("ml") ?: return null, fields["phase"] ?: return null)
+            else -> null
+        }
+    }
+    fun isAllowedCommand(command: String): Boolean {
+        if (command.toByteArray(Charsets.UTF_8).size > 159 || '\n' in command || '\r' in command) return false
+        // The phone exposes only the explicit slave-reset action. New Master
+        // firmware clears an old Node role during startup automatically.
+        if (command == "mesh-reset CONFIRM") return true
+        val p = command.split(' ')
+        if (p.size == 1) return command == "hello" || command == "local"
+        if (p[0] in setOf("inventory", "mesh-state", "mesh-scan", "mesh-join", "mesh-retry")) {
+            if ((uint(p.getOrNull(1)) ?: 0) == 0L || (uint(p.getOrNull(2)) ?: 0) == 0L) return false
+            return when (p[0]) {
+                "mesh-join" -> p.size == 4 && p[3].matches(Regex("[0-9a-fA-F]{32}"))
+                "mesh-retry" -> p.size == 4 && (mask(p[3]) ?: 0) in 1..0x7fff
+                else -> p.size == 3
+            }
+        }
+        if (p[0] == "pump-speed") return p.size == 4 && (uint(p[1]) ?: 0) > 0 &&
+            uint(p[2]) != null && (uint(p[3], 3) ?: 0) > 0
+        if (client(p.getOrNull(1) ?: return false) == null || (uint(p.getOrNull(2)) ?: 0) == 0L) return false
+        return when (p[0]) {
+            "query" -> p.size == 3
+            "start" -> p.size == 7 && (uint(p[3]) ?: 0) > 0 && (mask(p[4]) ?: 0) > 0 &&
+                (uint(p[5], 1_000_000) ?: 0) > 0 && (uint(p[6], 240_000) ?: 0) > 0
+            "stop" -> p.size == 6 && p.drop(3).all { (uint(it) ?: 0) > 0 }
+            "pump-test" -> p.size == 5 && (uint(p[3]) ?: 0) > 0 && (uint(p[4], 10000) ?: 0) > 0
+            "pump-dry-test" -> p.size == 5 && (uint(p[3]) ?: 0) > 0 && (uint(p[4], 3000) ?: 0) > 0
+            "pump-test-stop", "pump-test-query" -> p.size == 4 && (uint(p[3]) ?: 0) > 0
+            else -> false
+        }
+    }
+    fun slots(mask: Long) = (1..32).filter { mask and (1L shl (it - 1)) != 0L }.joinToString(", ") { it.toString() }.ifEmpty { "无" }
+    fun phase(value: Int) = listOf("空闲", "准备", "开阀", "供水", "停止与结算", "切换节点", "已结束", "异常结束").getOrElse(value) { "未知" }
+}

@@ -1,0 +1,594 @@
+package com.cczb.app
+
+import android.annotation.SuppressLint
+import android.app.Application
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.AtomicFile
+import androidx.lifecycle.AndroidViewModel
+import java.io.File
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+data class MasterUiState(
+    val connection: MasterConnectionState = MasterConnectionState.Disconnected,
+    val scan: MasterScanState = MasterScanState.Idle,
+    val devices: List<MasterDevice> = emptyList(), val deviceName: String = "未选择主控",
+    val retryDevice: MasterDevice? = null,
+    val hello: MasterMessage.Hello? = null, val task: MasterTask? = null,
+    val report: MasterMessage.Report? = null, val volume: MasterMessage.Volume? = null,
+    val flows: Map<Long, MasterMessage.Flow> = emptyMap(), val storageHealthy: Boolean = true,
+    val statusFresh: Boolean = false, val statusAt: Long? = null,
+    val local: MasterMessage.Local? = null, val localFresh: Boolean = false, val localAt: Long? = null,
+    val stopPending: Boolean = false,
+    val pumpTest: MasterPumpTest? = null, val testStopPending: Boolean = false,
+    val testMessage: String = "选择档位和时长，点击启动测试；可随时停止",
+    val slaves: List<MasterSlave>? = null, val inventoryFresh: Boolean = false,
+    val inventoryLoading: Boolean = false, val inventoryMessage: String = "从机清单待同步",
+    val mesh: MasterMeshState? = null, val meshFresh: Boolean = false,
+    val meshPending: Boolean = false, val candidates: List<String> = emptyList(),
+    val meshMessage: String = "连接主机后可扫描附近从机",
+    val pwm: MasterPumpPwm = MasterPumpPwm(), val pwmFresh: Boolean = false,
+    val history: List<MasterHistoryEntry> = emptyList(), val historyHealthy: Boolean = true,
+    val message: String = "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统 PIN 配对。",
+    val log: List<String> = emptyList()
+) {
+    val connected get() = connection is MasterConnectionState.Connected
+    val managementBusy get() = meshPending || mesh?.busy == true
+    val selectableMask get() = if (!inventoryFresh) 0L else slaves.orEmpty().filter { it.selectable }
+        .fold(0L) { mask, node -> mask or (1L shl (node.slot - 1)) }
+    val canViewMesh get() = connected && statusFresh && hello?.role == "PUMP_MASTER" && meshFresh
+    val canManageMesh get() = connected && statusFresh && hello?.role == "PUMP_MASTER" &&
+        meshFresh && mesh?.capable == true && !managementBusy && storageHealthy && historyHealthy &&
+        !unknownResult && task?.unresolved != true && !pumpTestUnresolved && localFresh && local?.pumpCommand == false && pwm.pending == null
+    val canResetMesh get() = connected && statusFresh && hello?.role == "PUMP_MASTER" && meshFresh &&
+        mesh?.capable == true && !managementBusy && storageHealthy && historyHealthy &&
+        !unknownResult && task?.unresolved != true && !pumpTestUnresolved && localFresh && local?.pumpCommand == false &&
+        pwm.pending == null
+    // Scanning/provisioning is an operation owned by the Master.  It does not
+    // create a pump task, so an old pending task or a PWM acknowledgement must
+    // not make the Add device action permanently grey.  The Master remains the
+    // authority and rejects the command when it is actually busy.
+    val canMeshProvision get() = connected && statusFresh && hello?.role == "PUMP_MASTER" &&
+        meshFresh && mesh?.capable == true && !managementBusy &&
+        !unknownResult && localFresh && local?.pumpCommand == false
+    val canScanMesh get() = canMeshProvision && mesh?.phase in setOf("IDLE", "SCAN_DONE")
+    val canJoinMesh get() = canMeshProvision && mesh?.phase == "SCAN_DONE" && candidates.isNotEmpty()
+    // A connected Master may still be waiting for the first local/Mesh
+    // snapshot. Keep the button actionable so a tap requests a refresh and
+    // explains the missing prerequisite instead of looking dead.
+    // Once BLE is connected, let the user enter the scan flow while the first
+    // HELLO/MESH snapshots are still arriving. scanSlaves() refreshes those
+    // snapshots and reports the exact missing prerequisite. A busy Master is
+    // still kept out of the action; legacy cleanup is automatic in firmware.
+    val canRequestMeshScan get() = connected &&
+        (hello == null || hello.role == "PUMP_MASTER") && !managementBusy
+    val meshScanBlockReason: String? get() = when {
+        !connected -> "请先连接主机"
+        hello == null -> "正在确认主机身份，请稍候"
+        hello.role != "PUMP_MASTER" -> "当前连接的不是主节点"
+        !statusFresh || !meshFresh -> "正在同步主机组网状态，请稍候或点击刷新"
+        managementBusy -> "主机正在扫描或组网，请等待当前操作完成"
+        unknownResult -> "主机存在未确认的出水结果，请先查询结果后重试"
+        localFresh && local?.pumpCommand == true -> "水泵输出已开启，请先停止水泵"
+        !localFresh -> "水泵状态尚未同步，请点击刷新后重试"
+        mesh?.phase !in setOf("IDLE", "SCAN_DONE") -> "当前组网状态：${mesh?.label ?: "待同步"}"
+        else -> "主机暂时不可组网，请刷新状态后重试"
+    }
+    val unknownResult get() = task?.let { task ->
+        (report?.unknown ?: history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }?.report?.unknown ?: 0L) != 0L
+    } ?: false
+    val pumpOutputLabel get() = when {
+        !connected || !localFresh || local == null -> "水泵输出待同步"
+        local.pumpCommand -> "水泵输出已开启"
+        else -> "水泵输出已关闭"
+    }
+    val startBlockReason: String? get() = when {
+        !connected -> "请先连接主机"
+        hello == null -> "正在核实主机身份与状态"
+        hello.role != "PUMP_MASTER" -> "当前连接的是从机，请连接 PUMP_MASTER 主机"
+        !statusFresh -> "主机状态已过期，请刷新或重新连接"
+        !hello.mesh -> "主机尚未完成 Mesh 配网"
+        hello.address != hello.master -> "主机 Mesh 地址与固定 Master 配置不一致，请重启主机并重新连接"
+        !hello.commissioned -> "硬件输出尚未配置，请完成现场维护"
+        hello.fault != "NONE" -> "主机故障：${hello.fault}，请现场检查"
+        localFresh && local != null && local.fault != "NONE" -> "水泵故障：${local.fault}，请现场检查"
+        !hello.ready -> "主机尚未就绪"
+        managementBusy -> "主机正在扫描或组网，请等待完成"
+        !inventoryFresh || slaves == null -> "从机清单待同步，请刷新"
+        selectableMask == 0L -> "没有在线且已配置的从机，请到设备页扫描组网并完成现场配置"
+        !storageHealthy -> "请求记录无法保存，禁止新任务"
+        !historyHealthy -> "任务记录不完整，请先核实历史结果"
+        task?.unresolved == true -> "上一请求尚未结束或结果待确认"
+        unknownResult -> "上次任务存在未知结果，请查询并核实"
+        pumpTestUnresolved -> "水泵测试尚未结束或状态待确认"
+        pwm.pending != null -> "调速待确认，请先同步水泵档位"
+        else -> null
+    }
+    val canStart get() = startBlockReason == null
+    val pumpTestUnresolved get() = pumpTest?.unresolved == true || localFresh && local?.testActive == true
+    val manualTestSupported get() = pwmFresh && pwm.snapshot?.let { it.epoch == hello?.epoch && it.manualTest } == true
+    val dryTestSupported get() = manualTestSupported && pwm.snapshot?.dryMaxMs == 3000L
+    val dryTestBlockReason: String? get() = testBlockReason ?: when {
+        !dryTestSupported -> "请刷新状态；主机需更新至支持限时测试的固件"
+        pwm.snapshot?.revision == 0xffff_ffffL -> "档位序号已用尽，请重启主机后重新连接"
+        else -> null
+    }
+    val canStartDryTest get() = dryTestBlockReason == null
+    val testBlockReason: String? get() = when {
+        !connected -> "请先连接 PUMP_MASTER 主机，并完成系统 PIN 配对"
+        hello == null || !statusFresh -> "正在核实主机状态，请刷新"
+        hello.role != "PUMP_MASTER" -> "当前连接的是从机，请连接 PUMP_MASTER 主机"
+        !localFresh || local == null -> "水泵状态未同步，请刷新"
+        !local.testSupported -> "主机固件不支持独立试泵，请更新固件"
+        managementBusy -> "主机正在扫描或组网，请等待完成"
+        !hello.commissioned -> "水泵输出尚未启用，请现场核实接线并配置 commissioned"
+        local.fault == "BOOT_LOCK" && !manualTestSupported -> "当前固件启动锁定；请更新主机固件并重新连接"
+        local.fault !in setOf("NONE", "BOOT_LOCK") -> "水泵故障：${local.fault}，请现场检查"
+        hello.epoch == 0L -> "主机启动标识无效，请重新连接"
+        !storageHealthy -> "控制记录无法保存，禁止新测试"
+        !historyHealthy || unknownResult -> "出水记录存在未知结果，请先核实"
+        task?.unresolved == true -> "出水任务未结束，请先确认任务结果"
+        pumpTestUnresolved -> "测试执行中或结果待确认，请查询或停止测试"
+        local.pumpCommand -> "水泵输出已开启，请先确认当前任务"
+        !local.pumpReady -> "主机暂未允许试泵：请刷新并检查冷却、任务或存储状态"
+        pwm.pending != null -> "调速待确认，请先同步水泵档位"
+        pwm.snapshot != null && !pwmFresh -> "PWM 档位已过期，请刷新"
+        else -> null
+    }
+    val canStartTest get() = testBlockReason == null
+    val canSetSpeed get() = connected && statusFresh && !managementBusy && hello?.role == "PUMP_MASTER" &&
+        hello.commissioned && localFresh && (local?.fault == "NONE" || local?.fault == "BOOT_LOCK" && manualTestSupported) && pwmFresh &&
+        pwm.snapshot?.epoch == hello.epoch && pwm.snapshot.revision < 0xffff_ffffL &&
+        pwm.pending == null && storageHealthy && historyHealthy && !unknownResult && task?.unresolved != true &&
+        (local?.pumpCommand == false || local?.testActive == true) && pwm.snapshot?.dryActive != true &&
+        !(pumpTest?.unresolved == true && pumpTest.dryRun)
+    val canStopTest get() = connected && hello?.role == "PUMP_MASTER" && pumpTest?.unresolved == true
+    val canStop get() = connected && hello?.role == "PUMP_MASTER" && task?.unresolved == true && task.job != null
+    val canRetry get() = connected && statusFresh && !managementBusy && hello?.ready == true && storageHealthy && task?.outcome == MasterOutcome.PENDING && task.epoch == hello.epoch
+}
+
+class MasterControlViewModel(application: Application) : AndroidViewModel(application), MasterBleManager.Listener {
+    val manager = MasterBleManager(application, this)
+    private val state = MutableStateFlow(MasterUiState())
+    val ui = state.asStateFlow()
+    private val handler = Handler(Looper.getMainLooper())
+    // noBackupFilesDir prevents restoring the same identity onto another phone.
+    private val file = AtomicFile(File(application.noBackupFilesDir, "master-control.properties"))
+    private val historyFile = AtomicFile(File(application.noBackupFilesDir, "master-history.properties"))
+    private var ledger: MasterLedger? = null
+    private var address: String? = null
+    private var directStartReply = false
+    private var stopSequence: Long? = null
+    private var lastControlAt = -10_000L
+    private var lastHelloAt = 0L
+    private var lastLocalAt = 0L
+    private var lastPwmAt = 0L
+    private var pwmSentAt = 0L
+    private var requestId = SystemClock.elapsedRealtime() % 0xffff_ff00L
+    private var inventoryCollector: MasterInventoryCollector? = null
+    private var inventorySentAt = 0L
+    private var inventoryReceivedAt = 0L
+    private var meshRequest = 0L
+    private var meshSentAt = 0L
+    private var meshReceivedAt = 0L
+    private fun nextRequest(): Long { requestId = requestId % 0xffff_ffffL + 1; return requestId }
+    private val poll = object : Runnable {
+        override fun run() {
+            if (state.value.connected) {
+                val now = SystemClock.elapsedRealtime()
+                if (state.value.inventoryFresh && now - inventoryReceivedAt > 15_000)
+                    state.value = state.value.copy(inventoryFresh = false)
+                if (state.value.meshFresh && now - meshReceivedAt > 15_000)
+                    state.value = state.value.copy(meshFresh = false)
+                if (inventoryCollector != null && now - inventorySentAt > 8_000) {
+                    inventoryCollector = null
+                    state.value = state.value.copy(inventoryLoading = false, inventoryFresh = false, inventoryMessage = "从机清单同步超时，请刷新；需新版 Master 固件")
+                }
+                if (state.value.hello?.role == "PUMP_MASTER") {
+                    if (inventoryCollector == null && now - inventorySentAt > 10_000) requestInventory()
+                    val mesh = state.value.mesh
+                    val operationActive = mesh?.phase in setOf(
+                        "SCANNING", "JOINING", "CONFIGURING", "WAIT_HELLO", "CANCELLING", "RESETTING"
+                    )
+                    if (state.value.managementBusy && operationActive && now - meshSentAt >= 1_500) {
+                        // Keep the operation request id: the Master tags MESH with
+                        // this id and includes the scan's CAND entries in this reply.
+                        meshSentAt = now
+                        manager.sendCommand("mesh-state ${state.value.hello?.epoch} $meshRequest")
+                    } else if (!state.value.managementBusy && now - meshSentAt > 10_000) {
+                        requestMeshState()
+                    }
+                }
+                val fresh = state.value.hello != null && SystemClock.elapsedRealtime() - lastHelloAt <= 15_000
+                if (state.value.statusFresh != fresh) state.value = state.value.copy(statusFresh = fresh)
+                val localFresh = state.value.local != null && SystemClock.elapsedRealtime() - lastLocalAt <= 15_000
+                if (state.value.localFresh != localFresh) state.value = state.value.copy(localFresh = localFresh)
+                val pwmFresh = state.value.pwm.snapshot != null && SystemClock.elapsedRealtime() - lastPwmAt <= 15_000
+                if (state.value.pwmFresh != pwmFresh) state.value = state.value.copy(pwmFresh = pwmFresh)
+                if (state.value.pwm.pending != null && SystemClock.elapsedRealtime() - pwmSentAt > 8_000)
+                    state.value = state.value.copy(pwm = state.value.pwm.copy(message = "调速尚未确认，请刷新或重连核实；不会自动重发"))
+                if (state.value.hello == null || SystemClock.elapsedRealtime() - lastHelloAt > 10_000) manager.requestState()
+                if (state.value.hello?.role == "PUMP_MASTER" && state.value.task?.unresolved == true) query()
+                if (state.value.pumpTestUnresolved) { queryTest(); manager.sendCommand("local") }
+            }
+            handler.postDelayed(this, 2_000)
+        }
+    }
+    init {
+        runCatching {
+            if (file.baseFile.exists() || File(file.baseFile.path + ".bak").exists()) file.openRead().use(MasterLedger::read)
+            else MasterLedger.fresh().also { save(it) }
+        }.onSuccess { ledger = it }.onFailure { storageError(it) }
+        runCatching {
+            if (historyFile.baseFile.exists() || File(historyFile.baseFile.path + ".bak").exists())
+                historyFile.openRead().use(MasterHistory::read) else emptyList()
+        }.onSuccess { state.value = state.value.copy(history = it) }
+            .onFailure { state.value = state.value.copy(historyHealthy = false) }
+        handler.postDelayed(poll, 2_000)
+    }
+    private fun save(next: MasterLedger) {
+        val output = file.startWrite()
+        try { next.write(output); file.finishWrite(output) }
+        catch (error: Exception) { file.failWrite(output); throw error }
+        ledger = next
+    }
+    private fun storageError(error: Throwable) {
+        state.value = state.value.copy(storageHealthy = false, message = "控制记录保存失败，已禁止新任务：${error.message}")
+    }
+    private fun persistTask(task: MasterTask): Boolean = runCatching {
+        val current = checkNotNull(ledger)
+        val device = checkNotNull(address)
+        save(current.copy(sequence = maxOf(current.sequence, task.seq), tasks = current.tasks + (device to task)))
+    }.onFailure(::storageError).isSuccess
+    private fun persistTest(test: MasterPumpTest): Boolean = runCatching {
+        val current = checkNotNull(ledger)
+        save(current.copy(sequence = maxOf(current.sequence, test.seq), pumpTests = current.pumpTests + (checkNotNull(address) to test)))
+    }.onFailure(::storageError).isSuccess
+
+    private fun recordObservation() {
+        val current = state.value
+        val task = current.task ?: return
+        val device = address ?: return
+        val previous = current.history.firstOrNull { it.key == "$device/${task.client}/${task.seq}" }
+        val entry = MasterHistoryEntry(device, current.deviceName, task, System.currentTimeMillis(),
+            current.report?.copy(seq = task.seq) ?: previous?.report, current.volume ?: previous?.volume)
+        if (current.historyHealthy && previous != null && entry.copy(updatedAt = previous.updatedAt) == previous) return
+        val next = MasterHistory.upsert(current.history, entry)
+        runCatching {
+            val output = historyFile.startWrite()
+            try { MasterHistory.write(next, output); historyFile.finishWrite(output) }
+            catch (error: Exception) { historyFile.failWrite(output); throw error }
+        }.onSuccess { state.value = state.value.copy(history = next, historyHealthy = true) }
+            .onFailure { state.value = state.value.copy(history = next, historyHealthy = false) }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun connect(device: MasterDevice) {
+        address = device.device.address.uppercase()
+        directStartReply = false
+        stopSequence = null
+        state.value = state.value.copy(connection = MasterConnectionState.Connecting, hello = null, statusFresh = false, statusAt = null, report = null, volume = null, flows = emptyMap(), local = null, localFresh = false, localAt = null, stopPending = false,
+            slaves = null, inventoryFresh = false, inventoryLoading = false, mesh = null, meshFresh = false, meshPending = false, candidates = emptyList(),
+            pwm = MasterPumpPwm(), pwmFresh = false,
+            pumpTest = ledger?.pumpTests?.get(address), testStopPending = false, testMessage = "正在同步原测试状态；不会自动重新启动",
+            task = ledger?.tasks?.get(address), deviceName = device.advertisedName ?: "Master ${address}", retryDevice = device,
+            message = "正在连接；请完成系统 PIN 配对")
+        manager.connect(device.device)
+    }
+
+    fun retryConnection() {
+        state.value.retryDevice?.let(::connect)
+    }
+    fun start(mask: Long, ml: Long, seconds: Long) {
+        if (!state.value.canStart) return
+        if (mask !in 1..0xffff_ffffL || mask and state.value.selectableMask.inv() != 0L || ml !in 1..1_000_000 || seconds !in 1..240) {
+            message("请选择节点，水量 1–1000000 mL，时限 1–240 秒")
+            return
+        }
+        val current = ledger ?: return
+        val hello = state.value.hello ?: return
+        val task = runCatching { MasterTask(current.client, current.nextSequence(), hello.epoch, mask, ml, seconds * 1000) }
+            .onFailure(::storageError).getOrNull() ?: return
+        if (!MasterProtocol.isAllowedCommand(task.command())) { message("请选择节点，流量 1–1000000 mL，时限 1–240 秒"); return }
+        if (SystemClock.elapsedRealtime() - lastControlAt < 300) { message("请稍后再启动"); return }
+        if (!persistTask(task)) return
+        directStartReply = true
+        stopSequence = null
+        lastControlAt = SystemClock.elapsedRealtime()
+        state.value = state.value.copy(task = task, report = null, volume = null, flows = emptyMap(), stopPending = false, message = "等待 Master 确认任务；请勿重复启动")
+        recordObservation()
+        manager.sendCommand(task.command())
+    }
+    fun query() {
+        val task = state.value.task ?: return
+        if (!state.value.connected || state.value.hello?.role != "PUMP_MASTER") return
+        if (SystemClock.elapsedRealtime() - lastControlAt < 300) return
+        directStartReply = false
+        lastControlAt = SystemClock.elapsedRealtime()
+        manager.sendCommand(task.query())
+    }
+    fun retryOriginal() {
+        if (!state.value.canRetry) return
+        val task = state.value.task ?: return
+        if (SystemClock.elapsedRealtime() - lastControlAt < 300) { message("请稍后重试"); return }
+        if (!persistTask(task)) return
+        directStartReply = true
+        lastControlAt = SystemClock.elapsedRealtime()
+        message("正在重试原请求，沿用原身份、序号和参数，等待 Master 确认")
+        manager.sendCommand(task.command())
+    }
+    fun setSpeed(level: Int) {
+        val current = state.value
+        if (!current.canSetSpeed) return
+        val next = current.pwm.request(level)
+        if (next.pending == null || next == current.pwm) return
+        val snapshot = current.pwm.snapshot ?: return
+        pwmSentAt = SystemClock.elapsedRealtime()
+        state.value = current.copy(pwm = next)
+        manager.sendCommand(snapshot.command(level))
+    }
+    fun startTest(seconds: Int, dryRun: Boolean = false) {
+        if (dryRun) {
+            if (!state.value.canStartDryTest || seconds != 3) return
+        } else if (!state.value.canStartTest || seconds !in listOf(3, 5, 10)) return
+        val current = ledger ?: return
+        val test = runCatching { MasterPumpTest(current.client, current.nextSequence(), checkNotNull(state.value.hello).epoch, seconds * 1000L, dryRun = dryRun) }
+            .onFailure(::storageError).getOrNull() ?: return
+        if (!persistTest(test)) return
+        state.value = state.value.copy(pumpTest = test, testStopPending = false, testMessage = "启动待确认，请勿重复启动；主机到时自动停泵")
+        manager.sendCommand(test.command())
+    }
+    fun stopTest() {
+        if (!state.value.canStopTest) return
+        val test = state.value.pumpTest ?: return
+        state.value = state.value.copy(testStopPending = true, testMessage = "停止待确认；正在取消原测试请求")
+        manager.sendCommand(test.stop())
+    }
+    fun queryTest() {
+        val test = state.value.pumpTest ?: return
+        if (state.value.connected && state.value.hello?.role == "PUMP_MASTER") manager.sendCommand(test.query())
+    }
+    private fun resetMeshState() {
+        inventoryCollector = null; inventorySentAt = 0; inventoryReceivedAt = 0; meshRequest = 0; meshSentAt = 0; meshReceivedAt = 0
+        state.value = state.value.copy(slaves = null, inventoryFresh = false, inventoryLoading = false,
+            inventoryMessage = "从机清单待同步", mesh = null, meshFresh = false, meshPending = false, candidates = emptyList(), meshMessage = "组网状态待同步")
+    }
+    private fun requestInventory() {
+        val current = state.value
+        val hello = current.hello ?: return
+        if (!current.connected || hello.role != "PUMP_MASTER" || inventoryCollector != null) return
+        val req = nextRequest()
+        inventoryCollector = MasterInventoryCollector(hello.epoch, req)
+        inventorySentAt = SystemClock.elapsedRealtime()
+        state.value = current.copy(inventoryLoading = true, inventoryMessage = "正在同步从机清单…")
+        manager.sendCommand("inventory ${hello.epoch} $req")
+    }
+    private fun requestMeshState() {
+        val hello = state.value.hello ?: return
+        if (!state.value.connected || hello.role != "PUMP_MASTER" || state.value.managementBusy) return
+        meshRequest = nextRequest(); meshSentAt = SystemClock.elapsedRealtime()
+        manager.sendCommand("mesh-state ${hello.epoch} $meshRequest")
+    }
+    private fun meshCommand(command: String, argument: String = "", allowed: (MasterUiState) -> Boolean = { it.canManageMesh }) {
+        if (!allowed(state.value)) return
+        val hello = state.value.hello ?: return
+        meshRequest = nextRequest(); meshSentAt = SystemClock.elapsedRealtime()
+        state.value = state.value.copy(meshPending = true, meshMessage = "已发送请求，等待 Master 确认")
+        manager.sendCommand("$command ${hello.epoch} $meshRequest${if (argument.isEmpty()) "" else " $argument"}")
+    }
+    fun resetMesh() {
+        if (!state.value.canResetMesh) return
+        state.value = state.value.copy(meshPending = true, meshMessage = "已发送重置请求，等待 Master 清除从机并重启")
+        manager.sendCommand("mesh-reset CONFIRM")
+    }
+    fun scanSlaves() {
+        val current = state.value
+        if (!current.canScanMesh) {
+            state.value = current.copy(meshMessage = current.meshScanBlockReason ?: "主机暂时不可组网，请刷新状态后重试")
+            if (current.connected) refresh()
+            return
+        }
+        meshCommand("mesh-scan", allowed = { it.canScanMesh })
+    }
+    fun joinSlave(uuid: String) { if (uuid in state.value.candidates) meshCommand("mesh-join", uuid, allowed = { it.canJoinMesh }) }
+    fun retrySlave(address: Long) { if (state.value.slaves.orEmpty().any { it.address == address }) meshCommand("mesh-retry", address.toString(16)) }
+    fun refresh() { if (state.value.connected) { manager.requestState(); query(); queryTest(); requestInventory(); requestMeshState() } }
+    fun stop() {
+        val current = state.value
+        if (!current.canStop) { query(); return }
+        val task = current.task ?: return
+        val job = task.job ?: return
+        val hello = current.hello ?: return
+        // Stops use a known task key. Never guess a task number after reconnect.
+        val seq = runCatching {
+            stopSequence ?: checkNotNull(ledger).let { old -> old.nextSequence().also { save(old.copy(sequence = it)) } }
+        }.getOrElse {
+            // An already accepted job can still be stopped with its original nonzero sequence.
+            storageError(it)
+            task.seq
+        }
+        stopSequence = seq
+        state.value = state.value.copy(stopPending = true)
+        message("已请求停止，等待 Master 回复和阀门结算")
+        manager.sendCommand("stop ${task.client} $seq ${hello.epoch} ${job.epoch} ${job.id}")
+    }
+    private fun message(text: String) { state.value = state.value.copy(message = text) }
+    override fun onConnectionStateChanged(state: MasterConnectionState) {
+        this.state.value = this.state.value.copy(connection = state,
+            hello = if (state is MasterConnectionState.Connected) this.state.value.hello else null,
+            statusFresh = state is MasterConnectionState.Connected && this.state.value.statusFresh,
+            localFresh = state is MasterConnectionState.Connected && this.state.value.localFresh)
+        if (state !is MasterConnectionState.Connected) {
+            resetMeshState()
+            this.state.value = this.state.value.copy(pwm = MasterPumpPwm(), pwmFresh = false)
+            directStartReply = false
+            if (state is MasterConnectionState.Disconnected || state is MasterConnectionState.Error)
+                message("连接已断开；已接受任务由 Master 继续执行，重连后查询原任务")
+        }
+    }
+    override fun onScanStateChanged(state: MasterScanState) { this.state.value = this.state.value.copy(scan = state) }
+    override fun onDevicesChanged(devices: List<MasterDevice>) { state.value = state.value.copy(devices = devices) }
+    override fun onError(message: String) { message(message) }
+    override fun onCommandResult(command: String, success: Boolean, message: String) {
+        if (command == "mesh-reset CONFIRM") {
+            if (!success) state.value = state.value.copy(meshPending = false, meshMessage = message)
+            else state.value = state.value.copy(meshMessage = "重置命令已写入，等待 Master 清除从机并重启")
+            return
+        }
+        if (!success && command.startsWith("pump-speed ")) {
+            state.value = state.value.copy(pwm = state.value.pwm.copy(message = "$message；档位待确认，请刷新或重连核实"))
+            return
+        }
+        if (!success && (command.startsWith("pump-test") || command.startsWith("pump-dry-test "))) {
+            state.value = state.value.copy(testMessage = "$message；测试状态待确认，请重连或刷新，勿重复启动")
+            return
+        }
+        if (!success) this.message("$message；任务结果需通过查询确认")
+        // Successful GATT writes intentionally do not change task acceptance.
+    }
+    override fun onStatus(status: String) {
+        state.value = state.value.copy(log = (state.value.log + status).takeLast(24))
+        if (status.trim() == "OK mesh_reset_started") {
+            state.value = state.value.copy(meshMessage = "Master 正在清除全部从机连接信息")
+        } else if (status.trim() == "OK mesh_reset rebooting") {
+            state.value = state.value.copy(meshPending = false, slaves = emptyList(), candidates = emptyList(), inventoryFresh = false,
+                meshFresh = false, meshMessage = "从机组网已重置，Master 正在重启；重连后可重新添加从机")
+        } else if (status.trim() in setOf("INVALID mesh_reset_confirmation", "MESH_RESET_NOT_REQUIRED", "MESH_RESET_NOT_READY",
+                "BUSY mesh_reset_requires_idle", "MESH_RESET_FAILED")) {
+            state.value = state.value.copy(meshPending = false, meshMessage = status.trim())
+        }
+        when (val parsed = MasterProtocol.parse(status)) {
+            is MasterMessage.Hello -> {
+                val first = state.value.hello == null
+                if (state.value.hello?.epoch != parsed.epoch) {
+                    resetMeshState()
+                    state.value = state.value.copy(pwm = MasterPumpPwm(), pwmFresh = false, localFresh = false)
+                }
+                lastHelloAt = SystemClock.elapsedRealtime()
+                state.value = state.value.copy(hello = parsed, statusFresh = true, statusAt = System.currentTimeMillis())
+                if (first) { requestInventory(); requestMeshState() }
+                if (parsed.role != "PUMP_MASTER") message("当前设备不是 Master，请连接 PUMP_MASTER 设备")
+                else if (state.value.task?.let { it.unresolved && it.epoch != parsed.epoch } == true)
+                    message("主机已重启，上次请求结果待核实；不会自动重新出水")
+                else {
+                    if (first) { message(if (parsed.ready) "主控已连接" else "主控已连接，请查看配网、输出配置与故障状态"); query(); queryTest() }
+                }
+            }
+            is MasterMessage.InventoryBegin, is MasterMessage.InventoryNode, is MasterMessage.InventoryEnd -> {
+                val complete = inventoryCollector?.accept(parsed) ?: return
+                inventoryCollector = null; inventoryReceivedAt = SystemClock.elapsedRealtime()
+                state.value = state.value.copy(slaves = complete, inventoryFresh = true, inventoryLoading = false,
+                    inventoryMessage = "已同步 ${complete.size} 台配对从机")
+            }
+            is MasterMessage.Mesh -> {
+                if (parsed.epoch != state.value.hello?.epoch || parsed.request != meshRequest) return
+                val old = state.value.mesh
+                meshReceivedAt = SystemClock.elapsedRealtime()
+                state.value = state.value.copy(mesh = parsed.state, meshFresh = true,
+                    meshPending = parsed.state.phase == "RESETTING",
+                    candidates = emptyList(), meshMessage = parsed.state.label)
+                if (old?.phase != parsed.state.phase && parsed.state.phase in setOf("READY", "FAILED")) requestInventory()
+            }
+            is MasterMessage.Candidate -> {
+                val current = state.value
+                if (parsed.epoch == current.hello?.epoch && parsed.scan == current.mesh?.scan &&
+                    current.candidates.size < 8 && parsed.uuid !in current.candidates)
+                    state.value = current.copy(candidates = current.candidates + parsed.uuid)
+            }
+            is MasterMessage.PumpPwm -> {
+                val hello = state.value.hello ?: return
+                if (hello.role != "PUMP_MASTER" || parsed.epoch != hello.epoch) return
+                val next = state.value.pwm.receive(parsed, hello.epoch)
+                if (next == state.value.pwm && state.value.pwm.snapshot != parsed) return
+                lastPwmAt = SystemClock.elapsedRealtime()
+                state.value = state.value.copy(pwm = next, pwmFresh = true)
+            }
+            is MasterMessage.Local -> {
+                val hello = state.value.hello ?: return
+                if (hello.role != "PUMP_MASTER") return
+                lastLocalAt = SystemClock.elapsedRealtime()
+                state.value = state.value.copy(local = parsed, localFresh = true, localAt = System.currentTimeMillis())
+                val previous = state.value.pumpTest
+                val identity = ledger?.client
+                if (parsed.testActive && identity != null && parsed.testClient == identity && parsed.testSeq > 0) {
+                    val test = when {
+                        previous?.seq == parsed.testSeq && previous.epoch == hello.epoch -> previous.reconcile(
+                            MasterMessage.PumpTest(identity, parsed.testSeq, hello.epoch, "OK", "RUNNING", "QUERY"))
+                        previous == null || parsed.testSeq > previous.seq -> MasterPumpTest(
+                            identity, parsed.testSeq, hello.epoch, maxOf(1L, parsed.testMs), MasterOutcome.ACCEPTED)
+                        else -> previous
+                    }
+                    if (test != previous) persistTest(test)
+                    state.value = state.value.copy(pumpTest = test, testMessage = if (test.unresolved)
+                        "测试中，主机报告剩余 ${parsed.testMs} ms" else "收到旧测试快照，正在核实当前输出")
+                } else if (previous?.unresolved == true && !parsed.pumpCommand && hello.epoch != previous.epoch) {
+                    val test = previous.copy(outcome = MasterOutcome.FINISHED)
+                    persistTest(test)
+                    state.value = state.value.copy(pumpTest = test, testStopPending = false, testMessage = "主机已重启，确认输出关闭；原测试不会自动恢复")
+                }
+            }
+            is MasterMessage.PumpTest -> {
+                val test = state.value.pumpTest ?: return
+                if (parsed.client != test.client || parsed.seq != test.seq || parsed.epoch != test.epoch) return
+                if (!test.unresolved) return
+                val next = test.reconcile(parsed)
+                if (next != test) persistTest(next)
+                state.value = state.value.copy(pumpTest = next, testStopPending = state.value.testStopPending && next.unresolved, testMessage = when {
+                    parsed.state == "RUNNING" -> if (state.value.testStopPending) "停止待确认；主机仍报告测试中" else "主机已确认测试中，到时自动停止"
+                    parsed.state == "STOPPED" -> "主机已确认测试输出关闭"
+                    next.outcome == MasterOutcome.REJECTED -> "主机未接受测试：${parsed.reply}"
+                    else -> "测试状态待确认：${parsed.reply}；请刷新或停止原测试"
+                })
+            }
+            is MasterMessage.Report -> {
+                val task = state.value.task ?: return
+                if (parsed.client != task.client) return
+                val stopReply = parsed.seq == stopSequence && parsed.job != null && parsed.job == task.job
+                if (parsed.seq != task.seq && !stopReply) return
+                if (parsed.reply != "OK") {
+                    val next = task.reconcile(parsed, directStartReply && !stopReply)
+                    if (next != task) { persistTask(next); state.value = state.value.copy(task = next); recordObservation() }
+                    directStartReply = false
+                    message("Master 返回 ${parsed.reply}" + when (next.outcome) {
+                        MasterOutcome.REJECTED -> "；本次未接受"
+                        MasterOutcome.FINISHED -> "；保留已有终态记录，历史详情可能已移除"
+                        else -> "；结果尚未确认，请查询原任务"
+                    })
+                    return
+                }
+                if (parsed.job == null || parsed.job.epoch != task.epoch || parsed.mask != task.mask ||
+                    task.job != null && task.job != parsed.job) return
+                val oldReport = state.value.report
+                // Active phases repeat for each batch; only a final result must not regress.
+                if (task.outcome == MasterOutcome.FINISHED && parsed.phase < 6) return
+                if (oldReport != null && oldReport.job == parsed.job && oldReport.phase >= 6 && parsed.phase < 6) return
+                val next = task.reconcile(if (stopReply) parsed.copy(seq = task.seq) else parsed, false)
+                if (next != task) persistTask(next)
+                directStartReply = false
+                state.value = state.value.copy(task = next, report = parsed, stopPending = state.value.stopPending && next.unresolved, message = when {
+                    parsed.unknown != 0L -> "部分节点结果未知，请核实水路与节点状态"
+                    parsed.failed != 0L -> "部分节点执行异常，请查看结果"
+                    parsed.phase >= 6 -> "任务已结束；请结合节点结果和流量覆盖判断完成情况"
+                    else -> "Master 已接受任务：${MasterProtocol.phase(parsed.phase)}"
+                })
+                recordObservation()
+            }
+            is MasterMessage.Volume -> if (parsed.job == state.value.task?.job) {
+                val selected = state.value.task?.mask ?: 0L
+                if (parsed.measured and selected.inv() == 0L) { state.value = state.value.copy(volume = parsed); recordObservation() }
+            }
+            is MasterMessage.Flow -> if (parsed.job == state.value.task?.job) {
+                state.value = state.value.copy(flows = state.value.flows + (parsed.address to parsed))
+            }
+            null -> if (status == "RATE_LIMIT" || status.startsWith("INVALID") || status.startsWith("UNAUTHORIZED"))
+                message("$status；请查询任务确认状态")
+        }
+    }
+    override fun onCleared() {
+        handler.removeCallbacksAndMessages(null)
+        manager.close()
+        super.onCleared()
+    }
+}
