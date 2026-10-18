@@ -46,6 +46,7 @@ internal fun PumpApp(model: MasterControlViewModel) {
     var confirmStart by remember { mutableStateOf(false) }
     var confirmRetry by remember { mutableStateOf(false) }
     var confirmMeshReset by remember { mutableStateOf(false) }
+    var commissionSlot by rememberSaveable { mutableIntStateOf(0) }
     var renameSlot by rememberSaveable { mutableIntStateOf(0) }
     var renameText by rememberSaveable { mutableStateOf("") }
     val task = ui.task
@@ -98,6 +99,19 @@ internal fun PumpApp(model: MasterControlViewModel) {
         }, enabled = ui.canResetMesh && !ui.meshPending) { Text("确认重置") } },
         dismissButton = { TextButton(onClick = { confirmMeshReset = false }) { Text("取消") } }
     )
+    if (commissionSlot != 0) {
+        val target = ui.slaves?.firstOrNull { it.slot == commissionSlot }
+        AlertDialog(
+            onDismissRequest = { commissionSlot = 0 },
+            title = { Text("投产配置 · ${commissionSlot.toString().padStart(2, '0')} 号阀门") },
+            text = { Text("确认已现场检查阀门和流量计接线、核对流量系数 K，并确认安全互锁有效。确认后该从机将允许接受出水任务。此操作只保存配置，不会启动水泵或阀门。") },
+            confirmButton = { TextButton(onClick = {
+                commissionSlot = 0
+                model.commissionSlave(target?.slot ?: 0)
+            }, enabled = target != null && ui.canCommission(target)) { Text("确认投产") } },
+            dismissButton = { TextButton(onClick = { commissionSlot = 0 }) { Text("取消") } }
+        )
+    }
     if (renameSlot != 0) AlertDialog(
         onDismissRequest = { renameSlot = 0 }, title = { Text("$renameSlot 号阀门 · 本地别名") },
         text = { OutlinedTextField(renameText, { renameText = it.take(16) }, singleLine = true, label = { Text("别名（最多 16 字）") }, supportingText = { Text("留空恢复默认名称，仅保存到本手机。") }) },
@@ -228,16 +242,19 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         }
                         else -> {
                             if (ui.connected && !ui.canStart) ui.startBlockReason?.let { Feedback(it) }
+                            if (ui.connected && ui.hello?.fault == "BOOT_LOCK") {
+                                OutlinedButton(onClick = openPump, modifier = Modifier.fillMaxWidth()) { Text("查看并解除主机启动锁") }
+                            }
                             if (ui.message != "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统 PIN 配对。" && ui.message != "主控已连接") Feedback(ui.message)
                             TaskComposer(ui, mask, amount, seconds, ui.canStart, alias, { taskPage = "select" }, { amount = it }, { seconds = it }, { taskPage = "review" })
                         }
                     }
                 }
                 1 -> if (pumpDetail) PumpTestScreen(ui, duration, { duration = it }, { pumpDetail = false }, model::refresh,
-                    { if (ui.canStartTest) model.startTest(duration) }, model::stopTest, model::setSpeed)
+                    { if (ui.canStartTest) model.startTest(duration) }, model::stopTest, model::setSpeed, model::resetBootLock)
                     else DevicesScreen(ui, alias, { renameSlot = it; renameText = aliases[it] ?: "" }, openPump, model::refresh,
                         showAddDevice, { showAddDevice = true; model.scanSlaves() }, model::joinSlave, model::retrySlave,
-                        { confirmMeshReset = true })
+                        { confirmMeshReset = true }, { commissionSlot = it })
                 2 -> RecordsScreen(ui, alias) { previous ->
                     if (!unresolved && !ui.unknownResult) {
                         mask = previous.mask and ui.selectableMask; amount = previous.ml.toString(); seconds = (previous.maxMs / 1000).toString()

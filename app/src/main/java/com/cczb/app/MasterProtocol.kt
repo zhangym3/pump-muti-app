@@ -36,12 +36,25 @@ fun slaveDisplayName(uuid: String): String {
     return "从机 ${uuid.takeLast(4).uppercase()}"
 }
 
+fun commissionReplyLabel(reply: String): String = when (reply) {
+    "BUSY" -> "主机或阀门正在执行其他操作"
+    "NOT_READY" -> "互锁或设备状态未就绪"
+    "OFFLINE" -> "从机无响应，请检查供电和 Mesh 连接"
+    "STORAGE" -> "从机存储失败"
+    "INVALID" -> "从机参数无效"
+    "UNAUTHORIZED" -> "目标从机不属于当前主机"
+    "STALE" -> "主机状态已变化，请刷新后重试"
+    else -> reply
+}
+
 sealed interface MasterMessage {
     data class InventoryBegin(val epoch: Long, val request: Long, val count: Int) : MasterMessage
     data class InventoryNode(val epoch: Long, val request: Long, val node: MasterSlave) : MasterMessage
     data class InventoryEnd(val epoch: Long, val request: Long, val count: Int) : MasterMessage
     data class Mesh(val epoch: Long, val request: Long, val state: MasterMeshState) : MasterMessage
     data class Candidate(val epoch: Long, val scan: Long, val uuid: String) : MasterMessage
+    data class Commission(val epoch: Long, val request: Long, val slot: Int, val address: Long,
+                          val reply: String, val commissioned: Boolean) : MasterMessage
     data class Hello(val role: String, val address: Long, val master: Long, val epoch: Long,
                      val mesh: Boolean, val commissioned: Boolean, val fault: String) : MasterMessage {
         val ready get() = role == "PUMP_MASTER" && address == master && address in 1..0x7fff &&
@@ -55,8 +68,10 @@ sealed interface MasterMessage {
     data class Local(val pumpCommand: Boolean, val phase: Int, val fault: String,
                      val testSupported: Boolean = false, val testActive: Boolean = false,
                      val testMs: Long = 0, val testClient: String? = null, val testSeq: Long = 0,
-                     val pumpReady: Boolean = false) : MasterMessage
+                     val pumpReady: Boolean = false, val pumpResetSupported: Boolean = false) : MasterMessage
     data class PumpTest(val client: String, val seq: Long, val epoch: Long, val reply: String, val state: String, val op: String) : MasterMessage
+    data class PumpReset(val epoch: Long, val request: Long, val reply: String, val fault: String,
+                         val output: Boolean) : MasterMessage
     data class PumpPwm(val epoch: Long, val revision: Long, val level: Int, val duty: Int,
                        val hz: Long, val output: Boolean, val reply: String,
                        val manualTest: Boolean = false, val dryMaxMs: Long = 0,
@@ -159,6 +174,12 @@ object MasterProtocol {
             "CAND" -> MasterMessage.Candidate(n("epoch")?.takeIf { it > 0 } ?: return null,
                 n("scan")?.takeIf { it > 0 } ?: return null,
                 fields["uuid"]?.takeIf { it.matches(Regex("[0-9a-fA-F]{32}")) }?.lowercase() ?: return null)
+            "COMMISSION" -> MasterMessage.Commission(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("req")?.takeIf { it > 0 } ?: return null,
+                n("slot")?.takeIf { it in 1..32 }?.toInt() ?: return null,
+                h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
+                fields["reply"]?.takeIf { it in replies } ?: return null,
+                (flag("commissioned") ?: return null) == 1L)
             "HELLO" -> MasterMessage.Hello(fields["role"] ?: return null, h("addr") ?: return null,
                 h("master") ?: return null, n("epoch") ?: return null,
                 (flag("mesh") ?: return null) == 1L,
@@ -170,17 +191,24 @@ object MasterProtocol {
                 val remaining = if (supported) n("test_ms")?.takeIf { it <= 10000 } ?: return null else 0L
                 val testClient = fields["test_client"]?.let(::client)
                 val testSeq = if (supported) n("test_seq") ?: return null else 0L
+                val resetSupported = fields["pump_reset"]?.let { (flag("pump_reset") ?: return null) == 1L } ?: false
                 val output = (flag("pump_command") ?: return null) == 1L
                 val phase = n("pump_phase")?.takeIf { it in setOf(0L, 2L, 4L) }?.toInt() ?: return null
                 if (active && (!output || phase != 2 || testClient == null || testSeq == 0L)) return null
                 MasterMessage.Local(output, phase, fields["fault"]?.takeIf { it.isNotBlank() } ?: return null,
-                    supported, active, remaining, testClient, testSeq, if (supported) (flag("pump_ready") ?: return null) == 1L else false)
+                    supported, active, remaining, testClient, testSeq, if (supported) (flag("pump_ready") ?: return null) == 1L else false,
+                    resetSupported)
             }
             "PUMP_TEST" -> MasterMessage.PumpTest(client(fields["client"] ?: return null) ?: return null,
                 n("seq")?.takeIf { it > 0 } ?: return null, n("epoch")?.takeIf { it > 0 } ?: return null,
                 fields["reply"]?.takeIf { it in replies } ?: return null,
                 fields["state"]?.takeIf { it in setOf("UNKNOWN", "RUNNING", "STOPPED") } ?: return null,
                 fields["op"]?.takeIf { it in setOf("START", "STOP", "QUERY") } ?: return null)
+            "PUMP_RESET" -> MasterMessage.PumpReset(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("req")?.takeIf { it > 0 } ?: return null,
+                fields["reply"]?.takeIf { it in replies } ?: return null,
+                fields["fault"]?.takeIf { it.matches(Regex("[A-Z_]{1,24}")) } ?: return null,
+                (flag("output") ?: return null) == 1L)
             "PUMP_PWM" -> {
                 val extended = listOf("test_manual", "dry_max_ms", "dry_active").any(fields::containsKey)
                 val manual = if (extended) (flag("test_manual") ?: return null) == 1L else false
@@ -220,8 +248,15 @@ object MasterProtocol {
         // The phone exposes only the explicit slave-reset action. New Master
         // firmware clears an old Node role during startup automatically.
         if (command == "mesh-reset CONFIRM") return true
+        if (command.startsWith("pump-reset ")) {
+            val p = command.split(' ')
+            return p.size == 4 && p[0] == "pump-reset" && (uint(p[1]) ?: 0) > 0 &&
+                (uint(p[2]) ?: 0) > 0 && p[3] == "CONFIRM"
+        }
         val p = command.split(' ')
         if (p.size == 1) return command == "hello" || command == "local"
+        if (p[0] == "commission") return p.size == 5 &&
+            (uint(p[1]) ?: 0) > 0 && (uint(p[2]) ?: 0) > 0 && (uint(p[3], 32) ?: 0) in 1..32 && p[4] == "CONFIRM"
         if (p[0] in setOf("inventory", "mesh-state", "mesh-scan", "mesh-join", "mesh-retry")) {
             if ((uint(p.getOrNull(1)) ?: 0) == 0L || (uint(p.getOrNull(2)) ?: 0) == 0L) return false
             return when (p[0]) {

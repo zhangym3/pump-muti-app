@@ -183,7 +183,7 @@ internal fun SlotPager(group: Int, onGroup: (Int) -> Unit) {
 internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: (Int) -> Unit, onPump: () -> Unit, onRefresh: () -> Unit,
                            showAddDevice: Boolean, onOpenAdd: () -> Unit,
                            onJoin: (String) -> Unit = {}, onRetry: (Long) -> Unit = {},
-                           onResetMesh: () -> Unit = {}) {
+                           onResetMesh: () -> Unit = {}, onCommission: (Int) -> Unit = {}) {
     var showMaintenance by rememberSaveable { mutableStateOf(false) }
     MasterSummary(ui, onRefresh)
     Button(onClick = onOpenAdd, enabled = ui.canRequestMeshScan, modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp)) {
@@ -214,16 +214,23 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
                 Text(if (slot == 0) "—" else slot.toString().padStart(2, '0'), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(if (slot == 0) "待配置从机" else alias(slot))
-                    Supporting("${if (!ui.inventoryFresh) "状态待同步" else if (!node.online) "离线" else "在线"} · ${if (node.commissioned) "已配置" else "待现场配置"}")
+                    Supporting("${if (!ui.inventoryFresh) "状态待同步" else if (!node.online) "离线" else "在线"} · ${if (node.commissioned) "已投产" else "待投产配置"}")
                 }
                 if (slot > 0) TextButton(onClick = { onRename(slot) }) { Text("编辑") }
+            }
+            if (slot in 1..32 && !node.commissioned) {
+                OutlinedButton(onClick = { onCommission(slot) }, enabled = ui.canCommission(node),
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(if (ui.commissionPendingSlot == slot) "正在投产…" else "投产配置 · ${slot.toString().padStart(2, '0')} 号阀门")
+                }
             }
             if (!node.online || slot == 0) OutlinedButton(onClick = { onRetry(node.address) }, enabled = ui.canManageMesh,
                 modifier = Modifier.fillMaxWidth()) { Text("重试连接配置 · ${addressLabel(node.address)}") }
         }
         if (ui.slaves?.isEmpty() == true) Supporting("Master 尚未配对从机。")
         if (ui.slaves.orEmpty().any { !it.online || it.slot == 0 })
-            Supporting("离线或待配置的从机不能执行出水任务。")
+            Supporting("离线或待投产配置的从机不能执行出水任务。")
+        if (ui.commissionMessage.isNotEmpty()) Feedback(ui.commissionMessage)
     }
     TextButton(onClick = { showMaintenance = !showMaintenance }) {
         Text(if (showMaintenance) "收起维护" else "设备维护")
@@ -241,12 +248,30 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
 @Composable
 internal fun PumpTestScreen(ui: MasterUiState, duration: Int, onDuration: (Int) -> Unit,
                             onBack: () -> Unit, onRefresh: () -> Unit,
-                            onStart: () -> Unit, onStop: () -> Unit, onSpeed: (Int) -> Unit = {}) {
+                            onStart: () -> Unit, onStop: () -> Unit, onSpeed: (Int) -> Unit = {},
+                            onResetBootLock: () -> Unit = {}) {
+    var confirmBootUnlock by rememberSaveable { mutableStateOf(false) }
     val blockReason = ui.testBlockReason
+    if (confirmBootUnlock) AlertDialog(
+        onDismissRequest = { confirmBootUnlock = false },
+        title = { Text("解除主机启动锁") },
+        text = { Text("主机确认当前无任务、无未知结果、无输出且 Mesh 空闲后，将解除本次启动锁定。此操作不会启动水泵；重启主机后仍需再次确认解除。") },
+        confirmButton = { TextButton(onClick = {
+            confirmBootUnlock = false
+            onResetBootLock()
+        }, enabled = ui.canResetBootLock) { Text("确认解除") } },
+        dismissButton = { TextButton(onClick = { confirmBootUnlock = false }) { Text("取消") } }
+    )
     TextButton(onClick = onBack) { Text("‹ 返回设备") }
     Text("水泵设备", style = MaterialTheme.typography.headlineSmall)
     Supporting(ui.hello?.let { "主机 ${addressLabel(it.master)} · 公共水泵" } ?: "主机 · 公共水泵")
     PumpCard("通水测试") {
+        if (ui.local?.fault == "BOOT_LOCK") {
+            val resetHint = if (!ui.local.pumpResetSupported) "当前主机固件不支持手机解除启动锁，请更新主机固件。" else "主机处于启动锁定，正常出水已禁用。"
+            Feedback(ui.pumpResetMessage.ifEmpty { resetHint })
+            OutlinedButton(onClick = { confirmBootUnlock = true }, enabled = ui.canResetBootLock,
+                modifier = Modifier.fillMaxWidth()) { Text(if (ui.pumpResetRequest != null) "正在确认…" else "解除主机启动锁") }
+        }
         Column(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.primaryContainer) {
                 Icon(painterResource(R.drawable.ic_power), null, Modifier.padding(20.dp).size(32.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)

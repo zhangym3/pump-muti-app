@@ -41,6 +41,29 @@ class MasterPumpTestTest {
         listOf("pump-test a1 1 7 0", "pump-test a1 1 7 10001", "pump-test a1 1 0 3000",
             "pump-test-stop a1 0 7", "pump-test a1 1 7 3000\nlocal", "pump-reset", "estop").forEach { assertFalse(it, MasterProtocol.isAllowedCommand(it)) }
     }
+    @Test fun phoneBootLockResetRequiresFreshSafeStateAndAConfirmedCorrelatedReply() {
+        val locked = ready.copy(hello = hello.copy(fault = "BOOT_LOCK"),
+            local = local.copy(fault = "BOOT_LOCK", phase = 4, pumpResetSupported = true), meshFresh = true,
+            mesh = MasterMeshState("IDLE", false, true, "NONE", 0, 0, 0, 0))
+        assertTrue(locked.canResetBootLock)
+        assertFalse(locked.copy(local = locked.local!!.copy(pumpResetSupported = false)).canResetBootLock)
+        listOf(locked.copy(localFresh = false), locked.copy(statusFresh = false),
+            locked.copy(hello = hello), locked.copy(local = local.copy(pumpCommand = true)),
+            locked.copy(mesh = locked.mesh!!.copy(busy = true)), locked.copy(meshFresh = false),
+            locked.copy(storageHealthy = false), locked.copy(historyHealthy = false),
+            locked.copy(local = local.copy(testActive = true)),
+            locked.copy(task = MasterTask("a1", 1, 7, 1, 500, 60000)),
+            locked.copy(pumpResetRequest = 11)).forEach { assertFalse(it.canResetBootLock) }
+        val command = "pump-reset 7 11 CONFIRM"
+        assertTrue(MasterProtocol.isAllowedCommand(command))
+        listOf("pump-reset 0 11 CONFIRM", "pump-reset 7 0 CONFIRM", "pump-reset 7 11",
+            "pump-reset 7 11 CONFIRM extra", "pump-reset 7 11 CONFIRM\\nlocal").forEach {
+            assertFalse(it, MasterProtocol.isAllowedCommand(it))
+        }
+        assertEquals(MasterMessage.PumpReset(7, 11, "OK", "NONE", false),
+            MasterProtocol.parse("PUMP_RESET epoch=7 req=11 reply=OK fault=NONE output=0"))
+        assertNull(MasterProtocol.parse("PUMP_RESET epoch=7 req=11 reply=OK fault=NONE output=2"))
+    }
     @Test fun extendedLocalMustCarryCompleteValidCapabilityAndRunningIdentity() {
         val text = "LOCAL pump_command=1 pump_phase=2 fault=NONE test_supported=1 test_active=1 test_ms=2999 test_client=a1 test_seq=8 pump_ready=0"
         val parsed = MasterProtocol.parse(text) as MasterMessage.Local
@@ -50,6 +73,13 @@ class MasterPumpTestTest {
             text.replace("pump_command=1", "pump_command=0"), text.replace(" pump_ready=0", "")).forEach { assertNull(MasterProtocol.parse(it)) }
         assertFalse((MasterProtocol.parse("LOCAL pump_command=0 pump_phase=0 fault=NONE") as MasterMessage.Local).testSupported)
         assertEquals(reply("RUNNING"), MasterProtocol.parse("PUMP_TEST client=a1 seq=8 epoch=7 reply=OK state=RUNNING op=QUERY"))
+    }
+    @Test fun phoneBootLockCapabilityIsExplicitAndOldFirmwareRemainsUnsupported() {
+        val legacy = MasterProtocol.parse("LOCAL pump_command=0 pump_phase=4 fault=BOOT_LOCK") as MasterMessage.Local
+        assertFalse(legacy.pumpResetSupported)
+        val updated = MasterProtocol.parse("LOCAL pump_command=0 pump_phase=4 fault=BOOT_LOCK pump_reset=1") as MasterMessage.Local
+        assertTrue(updated.pumpResetSupported)
+        assertNull(MasterProtocol.parse("LOCAL pump_command=0 pump_phase=4 fault=BOOT_LOCK pump_reset=2"))
     }
     @Test fun responseMatchingAndStopFailureNeverReleaseAnUnknownStart() {
         assertEquals(test, test.reconcile(reply("RUNNING").copy(seq = 9)))

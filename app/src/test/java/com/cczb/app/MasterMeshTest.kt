@@ -80,6 +80,42 @@ class MasterMeshTest {
         assertEquals(0L, ui.copy(inventoryFresh = false).selectableMask)
         assertEquals(0L, MasterUiState().selectableMask)
     }
+
+    @Test fun commissionReplyAndCommandAreBoundedAndValidated() {
+        val parsed = MasterProtocol.parse(
+            "COMMISSION epoch=7 req=19 slot=32 addr=7fff reply=OK commissioned=1"
+        ) as MasterMessage.Commission
+        assertEquals(19L, parsed.request)
+        assertEquals(32, parsed.slot)
+        assertTrue(parsed.commissioned)
+        assertNull(MasterProtocol.parse("COMMISSION epoch=7 req=19 slot=33 addr=0002 reply=OK commissioned=1"))
+        assertNull(MasterProtocol.parse("COMMISSION epoch=7 req=19 slot=1 addr=0002 reply=OK commissioned=2"))
+        assertNull(MasterProtocol.parse("COMMISSION epoch=7 req=19 slot=1 addr=8000 reply=OK commissioned=1"))
+        assertTrue(MasterProtocol.isAllowedCommand("commission 7 19 32 CONFIRM"))
+        listOf("commission 0 19 1 CONFIRM", "commission 7 0 1 CONFIRM", "commission 7 19 0 CONFIRM",
+            "commission 7 19 33 CONFIRM", "commission 7 19 1 confirm", "commission 7 19 1 CONFIRM extra").forEach {
+            assertFalse(it, MasterProtocol.isAllowedCommand(it))
+        }
+    }
+
+    @Test fun commissioningRequiresFreshIdleOnlineUncommissionedNode() {
+        val hello = MasterMessage.Hello("PUMP_MASTER", 1, 1, 7, true, true, "NONE")
+        val base = MasterUiState(connection = MasterConnectionState.Connected, hello = hello, statusFresh = true,
+            local = MasterMessage.Local(false, 0, "NONE", true, pumpReady = true), localFresh = true,
+            slaves = listOf(MasterSlave(1, 2, true, false)), inventoryFresh = true,
+            mesh = MasterMeshState("IDLE", false, true, "NONE", 0, 0, 0, 0), meshFresh = true)
+        val node = base.slaves!!.single()
+        assertTrue(base.canCommission(node))
+        assertFalse(base.copy(inventoryFresh = false).canCommission(node))
+        assertFalse(base.copy(mesh = base.mesh!!.copy(busy = true)).canCommission(node))
+        assertFalse(base.copy(local = base.local!!.copy(pumpCommand = true)).canCommission(node))
+        assertFalse(base.copy(historyHealthy = false).canCommission(node))
+        val offline = node.copy(online = false)
+        val configured = node.copy(commissioned = true)
+        assertFalse(base.canCommission(offline))
+        assertFalse(base.canCommission(configured))
+    }
+
     @Test fun busyMeshBlocksNewControlAndKeepsStopsAvailable() {
         val hello = MasterMessage.Hello("PUMP_MASTER", 1, 1, 7, true, true, "NONE")
         val task = MasterTask("a1", 1, 7, 1, 500, 60000, MasterOutcome.ACCEPTED, MasterJobKey(7, 1))
