@@ -4,6 +4,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class MasterResultMergeTest {
+    @Test fun failedDoesNotProveMeasurementAndLateTargetCannotEraseMasterAbort() {
+        val stopped = MasterMessage.Report("a1", 42, "OK", MasterJobKey(7, 1), 7, 1, 0, 1, 1, "TRANSPORT")
+        val stillMissing = stopped.copy(unknown = 0, reason = "NONE")
+        assertEquals(1L, MasterResultMerge.report(stopped, stillMissing).unknown)
+        val terminal = stopped.copy(done = 1, unknown = 0, reason = "NONE")
+        val reconciled = MasterResultMerge.report(stopped, terminal)
+        assertEquals(0L, reconciled.unknown)
+        assertEquals(1L, reconciled.failed)
+        assertEquals("TRANSPORT", reconciled.reason)
+        // Reports have no revision. Ambiguous stale unknown evidence stays conservative
+        // until a subsequent query supplies the current device result.
+        assertEquals(1L, MasterResultMerge.report(reconciled, stopped).unknown)
+        val flow = MasterMessage.Flow(stopped.job!!, 2, 500, "DONE", 2940, 8, true, true, reason = "TARGET")
+        assertEquals("TARGET", MasterResultMerge.flow(flow, flow.copy(reason = "UNKNOWN")).reason)
+        assertEquals("TRANSPORT", reconciled.reason)
+        assertEquals("TARGET", flow.reason)
+    }
+
     private val job = MasterJobKey(7, 1)
     private val client = "fedcba9876543210"
 

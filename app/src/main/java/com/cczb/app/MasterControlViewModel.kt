@@ -302,7 +302,8 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         val device = address ?: return
         val previous = current.history.firstOrNull { it.key == "$device/${task.client}/${task.seq}" }
         val entry = MasterHistoryEntry(device, current.deviceName, task, System.currentTimeMillis(),
-            current.report?.copy(seq = task.seq) ?: previous?.report, current.volume ?: previous?.volume)
+            current.report?.copy(seq = task.seq) ?: previous?.report, current.volume ?: previous?.volume,
+            (previous?.flows ?: emptyMap()) + current.flows.mapValues { it.value.copy(receivedAt = 0) })
         if (current.historyHealthy && previous != null && entry.copy(updatedAt = previous.updatedAt) == previous) return
         val next = MasterHistory.upsert(current.history, entry)
         runCatching {
@@ -737,6 +738,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
                         flows = state.value.flows + (flow.address to MasterResultMerge.flow(state.value.flows[flow.address], flow)),
                         flowClockAt = flow.receivedAt
                     )
+                    recordObservation()
                 }
             }
             null -> if (status == "RATE_LIMIT" || status.startsWith("INVALID") || status.startsWith("UNAUTHORIZED"))

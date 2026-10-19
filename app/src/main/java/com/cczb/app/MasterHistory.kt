@@ -11,7 +11,8 @@ data class MasterHistoryEntry(
     val task: MasterTask,
     val updatedAt: Long,
     val report: MasterMessage.Report? = null,
-    val volume: MasterMessage.Volume? = null
+    val volume: MasterMessage.Volume? = null,
+    val flows: Map<Long, MasterMessage.Flow> = emptyMap()
 ) {
     val key get() = "$address/${task.client}/${task.seq}"
 }
@@ -37,10 +38,15 @@ object MasterHistory {
             p.setProperty(prefix + "outcome", item.task.outcome.name)
             p.setProperty(prefix + "job", item.task.job?.toString() ?: "")
             item.report?.let { r ->
-                p.setProperty(prefix + "report", "R client=${r.client} seq=${r.seq} reply=${r.reply} job=${r.job ?: "0:0"} phase=${r.phase} mask=${r.mask.toString(16)} done=${r.done.toString(16)} failed=${r.failed.toString(16)} unknown=${r.unknown.toString(16)}")
+                p.setProperty(prefix + "report", "R client=${r.client} seq=${r.seq} reply=${r.reply} job=${r.job ?: "0:0"} phase=${r.phase} mask=${r.mask.toString(16)} done=${r.done.toString(16)} failed=${r.failed.toString(16)} unknown=${r.unknown.toString(16)} reason=${r.reason}")
             }
             item.volume?.let { v ->
                 p.setProperty(prefix + "volume", "V job=${v.job} total_ml=${v.ml} measured=${v.measured.toString(16)}")
+            }
+            require(item.flows.size <= 32)
+            p.setProperty(prefix + "flowCount", item.flows.size.toString())
+            item.flows.values.sortedBy { it.address }.forEachIndexed { i, f ->
+                p.setProperty(prefix + "flow.$i", "FLOW addr=${f.address.toString(16)} job=${f.job} pulses=${f.pulses} ml=${f.ml} phase=${f.phase} revision=${f.revision} terminal=${if (f.terminal) 1 else 0} measured=${if (f.measured) 1 else 0} reason=${f.reason}")
             }
         }
         p.store(output, "Phone-local task observations")
@@ -79,8 +85,14 @@ object MasterHistory {
                     require(v != null && v.job == task.job && v.measured and task.mask.inv() == 0L)
                 }
             }
+            val flowCount = (p.getProperty(prefix + "flowCount") ?: "0").toInt().also { require(it in 0..32) }
+            val flows = (0 until flowCount).map {
+                (MasterProtocol.parse(requireNotNull(p.getProperty(prefix + "flow.$it"))) as? MasterMessage.Flow)
+                    .also { flow -> require(flow != null && flow.job == task.job) }!!
+            }.associateBy { it.address }
+            require(flows.size == flowCount)
             MasterHistoryEntry(address, p.getProperty(prefix + "name") ?: "主机", task,
-                p.getProperty(prefix + "time").toLong().also { require(it > 0) }, report, volume)
+                p.getProperty(prefix + "time").toLong().also { require(it > 0) }, report, volume, flows)
         }.sortedByDescending { it.updatedAt }
     }
 }

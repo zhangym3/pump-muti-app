@@ -255,9 +255,10 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         taskPage == "review" -> TaskReviewScreen(ui, mask, amount, seconds, individual, valveAmounts, valid, alias,
                             onBack = { taskPage = "select" }, onConfirm = { confirmStart = true })
                         task != null && (!showDraft || unresolved) -> {
+                            val historyEntry = ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }
                             TaskStatusHero(task, ui.report)
-                            TaskDetails(task, ui.report ?: ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }?.report,
-                                ui.volume ?: ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }?.volume, ui.flows, alias,
+                            TaskDetails(task, ui.report ?: historyEntry?.report,
+                                ui.volume ?: historyEntry?.volume, historyEntry?.flows.orEmpty() + ui.flows, alias,
                                 snapshot = !ui.connected || ui.report == null,
                                 expectedFlowAddresses = ui.expectedFlowAddresses, nowElapsed = ui.flowClockAt)
                             OutlinedButton(onClick = model::query, enabled = ui.connected, modifier = Modifier.fillMaxWidth()) { Text("查询原任务") }

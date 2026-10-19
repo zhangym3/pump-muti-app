@@ -62,7 +62,8 @@ sealed interface MasterMessage {
             epoch > 0 && mesh && commissioned && fault == "NONE"
     }
     data class Report(val client: String, val seq: Long, val reply: String, val job: MasterJobKey?,
-                      val phase: Int, val mask: Long, val done: Long, val failed: Long, val unknown: Long) : MasterMessage
+                      val phase: Int, val mask: Long, val done: Long, val failed: Long, val unknown: Long,
+                      val reason: String = "UNKNOWN") : MasterMessage
     data class Volume(val job: MasterJobKey, val ml: Long, val measured: Long) : MasterMessage
     data class Flow(
         val job: MasterJobKey,
@@ -73,7 +74,8 @@ sealed interface MasterMessage {
         val revision: Long = 0,
         val terminal: Boolean = phase in setOf("DONE", "FAULT"),
         val measured: Boolean = true,
-        val receivedAt: Long = 0
+        val receivedAt: Long = 0,
+        val reason: String = "UNKNOWN"
     ) : MasterMessage {
         fun isFresh(now: Long, maxAgeMs: Long = 10_000) =
             receivedAt > 0 && now >= receivedAt && now - receivedAt <= maxAgeMs
@@ -170,6 +172,7 @@ object MasterProtocol {
         fun n(name: String) = uint(fields[name])
         fun h(name: String) = mask(fields[name])
         fun flag(name: String) = n(name)?.takeIf { it <= 1 }
+        fun reason() = fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: if ("reason" in fields) null else "UNKNOWN"
         return when (parts.firstOrNull()) {
             "INV_BEGIN", "INV_END" -> {
                 val epoch = n("epoch")?.takeIf { it > 0 } ?: return null
@@ -256,7 +259,7 @@ object MasterProtocol {
                 if ((done or failed or unknown) and selected.inv() != 0L) return null
                 MasterMessage.Report(client(fields["client"] ?: return null) ?: return null,
                     n("seq")?.takeIf { it > 0 } ?: return null, reply, job,
-                    n("phase")?.takeIf { it <= 7 }?.toInt() ?: return null, selected, done, failed, unknown)
+                    n("phase")?.takeIf { it <= 7 }?.toInt() ?: return null, selected, done, failed, unknown, reason() ?: return null)
             }
             "V" -> MasterMessage.Volume(key(fields["job"]) ?: return null, n("total_ml") ?: return null, h("measured") ?: return null)
             "FLOW" -> {
@@ -267,7 +270,7 @@ object MasterProtocol {
                 MasterMessage.Flow(key(fields["job"]) ?: return null,
                     h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
                     n("ml") ?: return null, phase, n("pulses") ?: 0L, n("revision") ?: 0L,
-                    terminal, measured)
+                    terminal, measured, reason = reason() ?: return null)
             }
             else -> null
         }
@@ -323,13 +326,15 @@ object MasterResultMerge {
             old.mask != incoming.mask) return incoming
         val done = old.done or incoming.done
         val failed = old.failed or incoming.failed
-        val terminalEvidence = done or failed
-        val unknown = (old.unknown or incoming.unknown) and terminalEvidence.inv()
+        // Failed marks include unexecuted/unconfirmed nodes. Only explicit
+        // terminal evidence from the device can resolve an unknown result.
+        val unknown = (old.unknown and (incoming.done and incoming.unknown.inv()).inv()) or incoming.unknown
         return incoming.copy(
             phase = maxOf(old.phase, incoming.phase),
             done = done,
             failed = failed,
-            unknown = unknown
+            unknown = unknown,
+            reason = if (old.reason !in setOf("NONE", "UNKNOWN")) old.reason else incoming.reason
         )
     }
 
@@ -354,7 +359,26 @@ object MasterResultMerge {
             ml = if (rebootTerminal) incoming.ml else maxOf(old.ml, incoming.ml),
             phase = if (incoming.terminal || !old.terminal) incoming.phase else old.phase,
             terminal = old.terminal || incoming.terminal,
-            measured = if (rebootTerminal) false else old.measured || incoming.measured
+            measured = if (rebootTerminal) false else old.measured || incoming.measured,
+            reason = if (incoming.reason == "UNKNOWN") old.reason else incoming.reason
         )
     }
+}
+
+fun stopReasonLabel(reason: String): String = when (reason) {
+    "NONE" -> "尚无停止原因"
+    "TARGET" -> "达到目标脉冲量"
+    "MANUAL" -> "手动停止"
+    "LEASE" -> "租约证明超时，保护停止"
+    "TRANSPORT" -> "Mesh 通信异常，保护停止"
+    "PROTOCOL" -> "从机协议或能力不兼容"
+    "NO_FLOW" -> "未检测到有效流量"
+    "RUNTIME" -> "超过运行时限"
+    "PREPARE_TIMEOUT" -> "准备超时"
+    "TAIL_FLOW" -> "关闭后尾流未稳定"
+    "LOCAL_INTERLOCK" -> "本地互锁触发"
+    "PUMP_FAULT" -> "水泵保护触发"
+    "REBOOT" -> "设备重启，计量待核实"
+    "UNKNOWN" -> "停止原因未提供"
+    else -> "未知停止原因（$reason）"
 }

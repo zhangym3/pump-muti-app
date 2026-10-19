@@ -526,7 +526,7 @@ internal fun RecordsScreen(ui: MasterUiState, alias: (Int) -> String, onDraft: (
     if (selected != null) {
         TextButton(onClick = { selectedKey = null }) { Text("‹ 返回记录列表") }
         Supporting("${selected.deviceName} · 最后记录 ${displayTime(selected.updatedAt)}")
-        TaskDetails(selected.task, selected.report, selected.volume, alias = alias, snapshot = true)
+        TaskDetails(selected.task, selected.report, selected.volume, selected.flows, alias = alias, snapshot = true)
         OutlinedButton(onClick = { onDraft(selected.task) }, enabled = !ui.taskNeedsReconciliation && !ui.unknownResult && !selected.task.unresolved,
             modifier = Modifier.fillMaxWidth()) { Text("以此新建任务") }
         Supporting("只填入草稿，检查并确认后才会启动新的出水。")

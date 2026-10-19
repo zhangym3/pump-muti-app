@@ -186,6 +186,7 @@ internal fun TaskDetails(
         }
         report?.let {
             Supporting("已收到终态 ${java.lang.Long.bitCount(it.done)}/$count 路")
+            if (it.phase >= 6 || it.reason !in setOf("NONE", "UNKNOWN")) Supporting("主机：${stopReasonLabel(it.reason)}")
             if (it.failed != 0L) Text("异常槽位：${MasterProtocol.slots(it.failed)}", color = MaterialTheme.colorScheme.error)
             if (it.unknown != 0L) Text("结果未知槽位：${MasterProtocol.slots(it.unknown)}", color = MaterialTheme.colorScheme.error)
         }
@@ -224,7 +225,7 @@ internal fun TaskDetails(
             }
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 val terminal = report?.let { (it.done or it.failed or it.unknown) and bit != 0L } == true
-                val complete = report?.let { it.done and bit != 0L } == true
+                val complete = report?.let { it.done and bit != 0L && (it.failed or it.unknown) and bit == 0L } == true
                 Surface(shape = RoundedCornerShape(50), color = when {
                     complete -> androidx.compose.ui.graphics.Color(0xFFE7F7EF)
                     report?.let { (it.failed or it.unknown) and bit != 0L } == true -> MaterialTheme.colorScheme.errorContainer
@@ -259,7 +260,8 @@ internal fun TaskDetails(
             Supporting("按节点地址返回的计量")
             flows.toSortedMap().forEach { (address, flow) ->
                 Text("地址 ${addressLabel(address)} · ${flow.ml} mL · ${flow.pulses} 脉冲 · ${flow.phase}", style = MaterialTheme.typography.bodySmall)
-                Supporting("${if (flow.terminal) "终态已确认" else "执行中"} · ${if (flow.measured) "计量有效" else "计量待核实"} · ${if (flow.isFresh(nowElapsed)) "数据新鲜" else "数据已过期"} · rev ${flow.revision}")
+                Supporting(stopReasonLabel(flow.reason))
+                Supporting("${if (flow.terminal) "终态已确认" else "执行中"} · ${if (flow.measured) "计量有效" else "计量待核实"} · ${if (flow.receivedAt == 0L) "历史快照" else if (flow.isFresh(nowElapsed)) "数据新鲜" else "数据已过期"} · rev ${flow.revision}")
             }
         }
     }

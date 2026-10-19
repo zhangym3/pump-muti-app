@@ -7,6 +7,35 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class MasterHistoryTest {
+    @Test fun reasonsAndNodeResultsSurviveRestartWithoutBecomingFresh() {
+        val f = MasterMessage.Flow(MasterJobKey(7, 1), 2, 500, "DONE", 2940, 8, true, true,
+            receivedAt = 123, reason = "TARGET")
+        val original = entry.copy(report = report.copy(reason = "TRANSPORT"), flows = mapOf(2L to f))
+        val restored = MasterHistory.read(ByteArrayInputStream(bytes(listOf(original)))).single()
+        assertEquals("TRANSPORT", restored.report!!.reason)
+        assertEquals(f.copy(receivedAt = 0), restored.flows.getValue(2))
+        assertFalse(restored.flows.getValue(2).isFresh(123))
+    }
+
+    @Test fun oldHistoryWithoutReasonsOrFlowsStillLoadsAndInvalidFlowsFailClosed() {
+        val original = Properties().apply { load(ByteArrayInputStream(bytes(listOf(entry)))) }
+        original.remove("record.0.flowCount")
+        original.setProperty("record.0.report", original.getProperty("record.0.report").substringBefore(" reason="))
+        fun read(p: Properties) = MasterHistory.read(ByteArrayInputStream(ByteArrayOutputStream().also { p.store(it, null) }.toByteArray()))
+        assertEquals("UNKNOWN", read(original).single().report!!.reason)
+        assertTrue(read(original).single().flows.isEmpty())
+        val flow = "FLOW addr=0002 job=7:1 pulses=2940 ml=500 phase=DONE revision=8 terminal=1 measured=1 reason=TARGET"
+        for (invalid in listOf("job", "duplicate", "count")) {
+            val p = Properties().apply { putAll(original); setProperty("record.0.flowCount", "1"); setProperty("record.0.flow.0", flow) }
+            when (invalid) {
+                "job" -> p.setProperty("record.0.flow.0", flow.replace("job=7:1", "job=7:2"))
+                "duplicate" -> { p.setProperty("record.0.flowCount", "2"); p.setProperty("record.0.flow.1", flow) }
+                "count" -> p.setProperty("record.0.flowCount", "33")
+            }
+            assertThrows(Exception::class.java) { read(p) }
+        }
+    }
+
     private val task = MasterTask("a1", 42, 7, 0x80000001, 500, 60_000, MasterOutcome.FINISHED, MasterJobKey(7, 1))
     private val report = MasterMessage.Report("a1", 42, "OK", task.job, 6, task.mask, task.mask, 0, 0x80000000)
     private val entry = MasterHistoryEntry("AA:BB:CC:DD:EE:01", "泵房主机", task, 100, report, MasterMessage.Volume(task.job!!, 503, 1))

@@ -6,6 +6,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class MasterProtocolTest {
+    @Test fun stopReasonsAreOptionalForOldFirmwareAndRejectMalformedFields() {
+        val report = "R client=a1 seq=42 reply=OK job=7:1 phase=7 mask=1 done=0 failed=1 unknown=1"
+        val flow = "FLOW addr=0002 job=7:1 pulses=2940 ml=500 phase=DONE revision=8 terminal=1 measured=1"
+        assertEquals("UNKNOWN", (MasterProtocol.parse(report) as MasterMessage.Report).reason)
+        assertEquals("UNKNOWN", (MasterProtocol.parse(flow) as MasterMessage.Flow).reason)
+        for (reason in listOf("NONE", "TRANSPORT", "TARGET", "FUTURE_REASON")) {
+            assertEquals(reason, (MasterProtocol.parse("$report reason=$reason") as MasterMessage.Report).reason)
+            assertEquals(reason, (MasterProtocol.parse("$flow reason=$reason") as MasterMessage.Flow).reason)
+        }
+        for (reason in listOf("", "target", "LEASE1", "A".repeat(33))) {
+            assertNull(MasterProtocol.parse("$report reason=$reason"))
+            assertNull(MasterProtocol.parse("$flow reason=$reason"))
+        }
+        assertTrue(stopReasonLabel("FUTURE_REASON").contains("未知"))
+    }
+
     private val task = MasterTask("fedcba9876543210", 42, 7, 0x80000001, 500, 60_000)
     private fun report(reply: String = "OK", phase: Int = 3, job: String = "7:1", client: String = task.client,
                        seq: Long = task.seq, mask: String = "80000001") = MasterProtocol.parse(
