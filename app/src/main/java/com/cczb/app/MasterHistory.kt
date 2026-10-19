@@ -55,8 +55,9 @@ object MasterHistory {
             val address = requireNotNull(p.getProperty(prefix + "address"))
             require(Regex("([0-9A-F]{2}:){5}[0-9A-F]{2}").matches(address))
             val command = p.getProperty(prefix + "task")
-            require(command.startsWith("start ") && MasterProtocol.isAllowedCommand(command))
+            require((command.startsWith("start ") || command.startsWith("start-each ")) && MasterProtocol.isAllowedCommand(command))
             val fields = command.split(' ')
+            val individual = fields[0] == "start-each"
             require(fields[1] == p.getProperty(prefix + "client"))
             val job = p.getProperty(prefix + "job").takeIf { it.isNotEmpty() }?.split(':')?.let {
                 require(it.size == 2)
@@ -65,7 +66,8 @@ object MasterHistory {
                 }
             }
             val task = MasterTask(fields[1], fields[2].toLong(), fields[3].toLong(), fields[4].toLong(16),
-                fields[5].toLong(), fields[6].toLong(), MasterOutcome.valueOf(p.getProperty(prefix + "outcome")), job)
+                if (individual) 0 else fields[5].toLong(), fields[if (individual) 5 else 6].toLong(),
+                MasterOutcome.valueOf(p.getProperty(prefix + "outcome")), job, if (individual) fields[6] else "")
             require(task.outcome !in setOf(MasterOutcome.ACCEPTED, MasterOutcome.FINISHED) || job != null)
             val report = p.getProperty(prefix + "report")?.let {
                 (MasterProtocol.parse(it) as? MasterMessage.Report).also { r ->

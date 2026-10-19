@@ -2,10 +2,11 @@ package com.cczb.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD2C4FF)
-val PurpleGrey80 = Color(0xFFD0C8DD)
-val Pink80 = Color(0xFFE2B68F)
-
-val Purple40 = Color(0xFF6040D8)
-val PurpleGrey40 = Color(0xFF625D70)
-val Pink40 = Color(0xFF9B5E2C)
+val PumpBlue = Color(0xFF1677F8)
+val PumpBlueLight = Color(0xFF7DB4FF)
+val PumpNavy = Color(0xFF15223B)
+val PumpSlate = Color(0xFF64728B)
+val PumpPaleBlue = Color(0xFFEAF3FF)
+val PumpCanvas = Color(0xFFF4F7FC)
+val PumpGreen = Color(0xFF159447)
+val PumpRed = Color(0xFFD92D20)

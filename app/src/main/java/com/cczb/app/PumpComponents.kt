@@ -2,6 +2,7 @@ package com.cczb.app
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -30,10 +31,31 @@ internal fun taskStatus(task: MasterTask, report: MasterMessage.Report?): String
 }
 
 @Composable
-internal fun PumpCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
+internal fun PumpCard(
+    title: String,
+    icon: Int? = null,
+    accent: Boolean = false,
+    header: (@Composable RowScope.() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    when {
+                        icon != null -> Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                            Box(Modifier.size(34.dp), contentAlignment = Alignment.Center) {
+                                Icon(painterResource(icon), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        accent -> Surface(Modifier.width(5.dp).height(28.dp), shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primary) {}
+                    }
+                    Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+                }
+                header?.invoke(this)
+            }
             content()
         }
     }
@@ -46,7 +68,7 @@ internal fun Supporting(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 internal fun StatePill(text: String, attention: Boolean = false) {
-    Surface(shape = RoundedCornerShape(8.dp), color = if (attention) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer) {
+    Surface(shape = RoundedCornerShape(50), color = if (attention) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer) {
         Text(text, Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium,
             color = if (attention) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer)
     }
@@ -54,7 +76,7 @@ internal fun StatePill(text: String, attention: Boolean = false) {
 
 @Composable
 internal fun Feedback(text: String) {
-    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
         Text(text, Modifier.fillMaxWidth().padding(12.dp).semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -130,7 +152,7 @@ internal fun TaskStatusHero(task: MasterTask, report: MasterMessage.Report?) {
             finished -> taskStatus(task, report)
             else -> taskStatus(task, report)
         }, style = MaterialTheme.typography.titleLarge)
-        Supporting("$count 路 · 每路 ${task.ml} mL · 按编号顺序执行")
+        Supporting("$count 路 · ${task.amountLabel} · 按编号顺序执行")
     }
 }
 
@@ -141,7 +163,9 @@ internal fun TaskDetails(
     volume: MasterMessage.Volume?,
     flows: Map<Long, MasterMessage.Flow> = emptyMap(),
     alias: (Int) -> String = { "${it.toString().padStart(2, '0')} 号阀门" },
-    snapshot: Boolean = false
+    snapshot: Boolean = false,
+    expectedFlowAddresses: Set<Long>? = null,
+    nowElapsed: Long = 0
 ) {
     var expanded by rememberSaveable(task.client, task.seq) { mutableStateOf(false) }
     val slots = (1..32).filter { task.mask and (1L shl (it - 1)) != 0L }
@@ -149,8 +173,8 @@ internal fun TaskDetails(
     PumpCard(if (snapshot) "已保存的任务结果" else "本次任务") {
         Supporting("任务 ${task.job ?: "编号待确认"}")
         Text(taskStatus(task, report), style = MaterialTheme.typography.headlineSmall)
-        Supporting("$count 路 · 每路 ${task.ml} mL · 按编号顺序执行")
-        val total = task.ml * count
+        Supporting("$count 路 · ${task.amountLabel} · 按编号顺序执行")
+        val total = task.totalMl
         if (volume != null) {
             Text("已收到 ${volume.ml} mL", style = MaterialTheme.typography.headlineSmall)
             LinearProgressIndicator(progress = { (volume.ml.toFloat() / total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
@@ -164,6 +188,26 @@ internal fun TaskDetails(
             Supporting("已收到终态 ${java.lang.Long.bitCount(it.done)}/$count 路")
             if (it.failed != 0L) Text("异常槽位：${MasterProtocol.slots(it.failed)}", color = MaterialTheme.colorScheme.error)
             if (it.unknown != 0L) Text("结果未知槽位：${MasterProtocol.slots(it.unknown)}", color = MaterialTheme.colorScheme.error)
+        }
+        if (!snapshot && report?.phase?.let { it >= 6 } == true) {
+            if (expectedFlowAddresses == null) {
+                Supporting("执行终态已收到；正在核对水量覆盖。")
+            } else {
+                val selectedFlows = expectedFlowAddresses.mapNotNull(flows::get).filter { it.job == task.job }
+                val terminalCount = selectedFlows.count { it.terminal }
+                val measuredCount = selectedFlows.count { it.terminal && it.measured }
+                val freshCount = selectedFlows.count { it.isFresh(nowElapsed) }
+                Supporting("节点终态 $terminalCount/${expectedFlowAddresses.size} · 有效计量 $measuredCount/${expectedFlowAddresses.size} · 新鲜数据 $freshCount/${expectedFlowAddresses.size}")
+            }
+            val volumeComplete = volume?.let { it.job == task.job && (it.measured and task.mask) == task.mask } == true
+            val nodesComplete = expectedFlowAddresses?.all {
+                flows[it]?.let { flow -> flow.job == task.job && flow.terminal && flow.measured } == true
+            } == true
+            if (report?.unknown == 0L && volumeComplete && nodesComplete) {
+                Supporting("终态、V 水量覆盖和预期节点结果已收齐。")
+            } else {
+                Supporting("结果对账中，主机仍会继续查询未知节点并补发任务数据。")
+            }
         }
         if (snapshot) Supporting("这是已保存的数据，当前状态请连接主机后查询。")
     }
@@ -194,7 +238,7 @@ internal fun TaskDetails(
                 }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(alias(slot), style = MaterialTheme.typography.bodyMedium)
-                    Supporting(label)
+                    Supporting("目标 ${task.target(slot)} mL · $label")
                 }
                 StatePill(when {
                     report?.let { it.unknown and bit != 0L } == true -> "待核实"
@@ -214,7 +258,8 @@ internal fun TaskDetails(
             HorizontalDivider()
             Supporting("按节点地址返回的计量")
             flows.toSortedMap().forEach { (address, flow) ->
-                Text("地址 ${addressLabel(address)} · ${flow.ml} mL · ${flow.phase}", style = MaterialTheme.typography.bodySmall)
+                Text("地址 ${addressLabel(address)} · ${flow.ml} mL · ${flow.pulses} 脉冲 · ${flow.phase}", style = MaterialTheme.typography.bodySmall)
+                Supporting("${if (flow.terminal) "终态已确认" else "执行中"} · ${if (flow.measured) "计量有效" else "计量待核实"} · ${if (flow.isFresh(nowElapsed)) "数据新鲜" else "数据已过期"} · rev ${flow.revision}")
             }
         }
     }

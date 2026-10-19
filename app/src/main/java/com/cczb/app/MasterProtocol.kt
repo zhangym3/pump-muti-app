@@ -37,11 +37,11 @@ fun slaveDisplayName(uuid: String): String {
 }
 
 fun commissionReplyLabel(reply: String): String = when (reply) {
-    "BUSY" -> "主机或阀门正在执行其他操作"
-    "NOT_READY" -> "互锁或设备状态未就绪"
+    "BUSY" -> "主机、泵或阀门正在执行其他操作"
+    "NOT_READY" -> "阀门未就绪，请检查 K 系数/版本、阀门是否关闭及安全互锁"
     "OFFLINE" -> "从机无响应，请检查供电和 Mesh 连接"
     "STORAGE" -> "从机存储失败"
-    "INVALID" -> "从机参数无效"
+    "INVALID" -> "启用参数无效，或主机收到的请求格式不正确"
     "UNAUTHORIZED" -> "目标从机不属于当前主机"
     "STALE" -> "主机状态已变化，请刷新后重试"
     else -> reply
@@ -56,14 +56,28 @@ sealed interface MasterMessage {
     data class Commission(val epoch: Long, val request: Long, val slot: Int, val address: Long,
                           val reply: String, val commissioned: Boolean) : MasterMessage
     data class Hello(val role: String, val address: Long, val master: Long, val epoch: Long,
-                     val mesh: Boolean, val commissioned: Boolean, val fault: String) : MasterMessage {
+                     val mesh: Boolean, val commissioned: Boolean, val fault: String,
+                     val individual: Boolean = false) : MasterMessage {
         val ready get() = role == "PUMP_MASTER" && address == master && address in 1..0x7fff &&
             epoch > 0 && mesh && commissioned && fault == "NONE"
     }
     data class Report(val client: String, val seq: Long, val reply: String, val job: MasterJobKey?,
                       val phase: Int, val mask: Long, val done: Long, val failed: Long, val unknown: Long) : MasterMessage
     data class Volume(val job: MasterJobKey, val ml: Long, val measured: Long) : MasterMessage
-    data class Flow(val job: MasterJobKey, val address: Long, val ml: Long, val phase: String) : MasterMessage
+    data class Flow(
+        val job: MasterJobKey,
+        val address: Long,
+        val ml: Long,
+        val phase: String,
+        val pulses: Long = 0,
+        val revision: Long = 0,
+        val terminal: Boolean = phase in setOf("DONE", "FAULT"),
+        val measured: Boolean = true,
+        val receivedAt: Long = 0
+    ) : MasterMessage {
+        fun isFresh(now: Long, maxAgeMs: Long = 10_000) =
+            receivedAt > 0 && now >= receivedAt && now - receivedAt <= maxAgeMs
+    }
     /** This is a control output snapshot, not feedback from a running sensor. */
     data class Local(val pumpCommand: Boolean, val phase: Int, val fault: String,
                      val testSupported: Boolean = false, val testActive: Boolean = false,
@@ -101,10 +115,16 @@ data class MasterPumpTest(val client: String, val seq: Long, val epoch: Long, va
 enum class MasterOutcome { PENDING, ACCEPTED, REJECTED, FINISHED }
 data class MasterTask(
     val client: String, val seq: Long, val epoch: Long, val mask: Long, val ml: Long, val maxMs: Long,
-    val outcome: MasterOutcome = MasterOutcome.PENDING, val job: MasterJobKey? = null
+    val outcome: MasterOutcome = MasterOutcome.PENDING, val job: MasterJobKey? = null,
+    val amounts: String = ""
 ) {
     val unresolved get() = outcome == MasterOutcome.PENDING || outcome == MasterOutcome.ACCEPTED
-    fun command() = "start $client $seq $epoch ${mask.toString(16).padStart(8, '0')} $ml $maxMs"
+    val individual get() = amounts.isNotEmpty()
+    fun target(slot: Int) = if (individual) ValveAmounts.at(amounts, slot) else ml
+    val totalMl get() = ValveAmounts.slots(mask).sumOf(::target)
+    val amountLabel get() = if (individual) "单独设置" else "每路 $ml mL"
+    fun command() = if (individual) "start-each $client $seq $epoch ${mask.toString(16).padStart(8, '0')} $maxMs $amounts"
+        else "start $client $seq $epoch ${mask.toString(16).padStart(8, '0')} $ml $maxMs"
     fun query() = "query $client $seq"
 
     /** A transport write is never acceptance. Unknown query results stay unresolved. */
@@ -184,7 +204,8 @@ object MasterProtocol {
                 h("master") ?: return null, n("epoch") ?: return null,
                 (flag("mesh") ?: return null) == 1L,
                 (flag("commissioned") ?: return null) == 1L,
-                fields["pump_fault"] ?: return null)
+                fields["pump_fault"] ?: return null,
+                fields["individual"]?.let { (flag("individual") ?: return null) == 1L } ?: false)
             "LOCAL" -> {
                 val supported = fields["test_supported"]?.let { (flag("test_supported") ?: return null) == 1L } ?: false
                 val active = if (supported) (flag("test_active") ?: return null) == 1L else false
@@ -238,8 +259,16 @@ object MasterProtocol {
                     n("phase")?.takeIf { it <= 7 }?.toInt() ?: return null, selected, done, failed, unknown)
             }
             "V" -> MasterMessage.Volume(key(fields["job"]) ?: return null, n("total_ml") ?: return null, h("measured") ?: return null)
-            "FLOW" -> MasterMessage.Flow(key(fields["job"]) ?: return null,
-                h("addr")?.takeIf { it in 1..0x7fff } ?: return null, n("ml") ?: return null, fields["phase"] ?: return null)
+            "FLOW" -> {
+                val phase = fields["phase"]?.takeIf { it.matches(Regex("[A-Z_]{1,24}")) } ?: return null
+                val terminal = fields["terminal"]?.let { (flag("terminal") ?: return null) == 1L }
+                    ?: (phase == "DONE" || phase == "FAULT")
+                val measured = fields["measured"]?.let { (flag("measured") ?: return null) == 1L } ?: true
+                MasterMessage.Flow(key(fields["job"]) ?: return null,
+                    h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
+                    n("ml") ?: return null, phase, n("pulses") ?: 0L, n("revision") ?: 0L,
+                    terminal, measured)
+            }
             else -> null
         }
     }
@@ -271,7 +300,11 @@ object MasterProtocol {
         return when (p[0]) {
             "query" -> p.size == 3
             "start" -> p.size == 7 && (uint(p[3]) ?: 0) > 0 && (mask(p[4]) ?: 0) > 0 &&
-                (uint(p[5], 1_000_000) ?: 0) > 0 && (uint(p[6], 240_000) ?: 0) > 0
+                // Retain legacy accepted requests/history for exact retries after an upgrade.
+                (uint(p[5], 1_000_000) ?: 0).let { it >= 50 && it % 50 == 0L } &&
+                (uint(p[6], 240_000) ?: 0) > 0
+            "start-each" -> p.size == 7 && (uint(p[3]) ?: 0) > 0 &&
+                ValveAmounts.isValid(mask(p[4]) ?: 0, p[6]) && (uint(p[5], 240_000) ?: 0) > 0
             "stop" -> p.size == 6 && p.drop(3).all { (uint(it) ?: 0) > 0 }
             "pump-test" -> p.size == 5 && (uint(p[3]) ?: 0) > 0 && (uint(p[4], 10000) ?: 0) > 0
             "pump-dry-test" -> p.size == 5 && (uint(p[3]) ?: 0) > 0 && (uint(p[4], 3000) ?: 0) > 0
@@ -281,4 +314,47 @@ object MasterProtocol {
     }
     fun slots(mask: Long) = (1..32).filter { mask and (1L shl (it - 1)) != 0L }.joinToString(", ") { it.toString() }.ifEmpty { "无" }
     fun phase(value: Int) = listOf("空闲", "准备", "开阀", "供水", "停止与结算", "切换节点", "已结束", "异常结束").getOrElse(value) { "未知" }
+}
+
+/** Merges delayed BLE snapshots without discarding newer task or node evidence. */
+object MasterResultMerge {
+    fun report(old: MasterMessage.Report?, incoming: MasterMessage.Report): MasterMessage.Report {
+        if (old == null || old.job == null || old.job != incoming.job || old.client != incoming.client ||
+            old.mask != incoming.mask) return incoming
+        val done = old.done or incoming.done
+        val failed = old.failed or incoming.failed
+        val terminalEvidence = done or failed
+        val unknown = (old.unknown or incoming.unknown) and terminalEvidence.inv()
+        return incoming.copy(
+            phase = maxOf(old.phase, incoming.phase),
+            done = done,
+            failed = failed,
+            unknown = unknown
+        )
+    }
+
+    fun volume(old: MasterMessage.Volume?, incoming: MasterMessage.Volume): MasterMessage.Volume {
+        if (old == null || old.job != incoming.job) return incoming
+        return incoming.copy(ml = maxOf(old.ml, incoming.ml), measured = old.measured or incoming.measured)
+    }
+
+    fun flow(old: MasterMessage.Flow?, incoming: MasterMessage.Flow): MasterMessage.Flow {
+        if (old == null || old.job != incoming.job || old.address != incoming.address) return incoming
+        if (old.terminal && !incoming.terminal) return old
+        if (incoming.revision < old.revision) return old
+        if (incoming.revision > old.revision) {
+            // A reboot terminal record explicitly invalidates the previously
+            // observed total; other same-job totals only grow as pulses arrive.
+            return if (incoming.terminal && !incoming.measured) incoming
+            else incoming.copy(pulses = maxOf(old.pulses, incoming.pulses), ml = maxOf(old.ml, incoming.ml))
+        }
+        val rebootTerminal = incoming.terminal && !incoming.measured
+        return incoming.copy(
+            pulses = if (rebootTerminal) incoming.pulses else maxOf(old.pulses, incoming.pulses),
+            ml = if (rebootTerminal) incoming.ml else maxOf(old.ml, incoming.ml),
+            phase = if (incoming.terminal || !old.terminal) incoming.phase else old.phase,
+            terminal = old.terminal || incoming.terminal,
+            measured = if (rebootTerminal) false else old.measured || incoming.measured
+        )
+    }
 }

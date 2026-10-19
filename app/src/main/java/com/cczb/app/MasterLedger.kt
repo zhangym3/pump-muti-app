@@ -20,6 +20,7 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
         tasks.forEach { (address, task) ->
             p.setProperty("task.$address", listOf(task.seq, task.epoch, task.mask, task.ml, task.maxMs,
                 task.outcome.name, task.job?.epoch ?: 0, task.job?.id ?: 0).joinToString(","))
+            if (task.individual) p.setProperty("amounts.$address", task.amounts)
         }
         pumpTests.forEach { (address, test) ->
             p.setProperty("test.$address", listOf(test.seq, test.epoch, test.durationMs, test.outcome.name, if (test.dryRun) 1 else 0).joinToString(","))
@@ -43,7 +44,9 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
                 val address = name.removePrefix("task.").also { require(Regex("([0-9A-F]{2}:){5}[0-9A-F]{2}").matches(it)) }
                 val f = p.getProperty(name).split(',').also { require(it.size == 8) }
                 val task = MasterTask(client, f[0].toLong(), f[1].toLong(), f[2].toLong(), f[3].toLong(), f[4].toLong(),
-                    MasterOutcome.valueOf(f[5]), if (f[6] == "0" && f[7] == "0") null else MasterJobKey(f[6].toLong(), f[7].toLong()))
+                    MasterOutcome.valueOf(f[5]), if (f[6] == "0" && f[7] == "0") null else MasterJobKey(f[6].toLong(), f[7].toLong()),
+                    p.getProperty("amounts.$address", ""))
+                require(!task.individual || task.ml == 0L)
                 require(task.seq in 1..sequence && task.epoch in 1..0xffff_ffffL && task.mask in 1..0xffff_ffffL)
                 require(MasterProtocol.isAllowedCommand(task.command()))
                 task.job?.let { require(it.epoch == task.epoch && it.id in 1..0xffff_ffffL) }

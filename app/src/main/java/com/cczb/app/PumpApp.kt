@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,7 +39,8 @@ internal fun PumpApp(model: MasterControlViewModel) {
     var mask by rememberSaveable { mutableLongStateOf(0L) }
     var amount by rememberSaveable { mutableStateOf("500") }
     var seconds by rememberSaveable { mutableStateOf(preferences.getString("seconds", "60") ?: "60") }
-    var defaultSeconds by rememberSaveable { mutableStateOf(seconds) }
+    var individual by rememberSaveable { mutableStateOf(false) }
+    var valveAmounts by rememberSaveable { mutableStateOf(ArrayList(List(32) { "500" })) }
     var showDraft by rememberSaveable { mutableStateOf(true) }
     var showAddDevice by rememberSaveable { mutableStateOf(false) }
     var seenTask by rememberSaveable { mutableStateOf("") }
@@ -54,7 +56,11 @@ internal fun PumpApp(model: MasterControlViewModel) {
     val count = java.lang.Long.bitCount(mask)
     val ml = amount.toLongOrNull()
     val maxSeconds = seconds.toLongOrNull()
-    val valid = mask in 1..0xffff_ffffL && mask and ui.selectableMask.inv() == 0L && ml != null && ml in 1..1_000_000 && maxSeconds != null && maxSeconds in 1..240
+    val encodedAmounts = if (individual) ValveAmounts.encode(mask, valveAmounts) else null
+    val draftTotal = if (individual) ValveAmounts.slots(mask).sumOf { valveAmounts[it - 1].toLongOrNull() ?: 0 } else (ml ?: 0) * count
+    val valid = mask in 1..0xffff_ffffL && mask and ui.selectableMask.inv() == 0L &&
+        (if (individual) encodedAmounts != null && ui.hello?.individual == true else ml != null && VolumeRules.isValid(ml)) &&
+        maxSeconds != null && maxSeconds in 1..240
     val openPump = { tab = 1; pumpDetail = true }
     LaunchedEffect(ui.slaves, ui.inventoryFresh) {
         if (ui.inventoryFresh && !unresolved) mask = mask and ui.selectableMask
@@ -66,8 +72,9 @@ internal fun PumpApp(model: MasterControlViewModel) {
             showDraft = false
             if (task.unresolved) {
                 mask = task.mask
-                amount = task.ml.toString()
-                seconds = (task.maxMs / 1000).toString()
+                individual = task.individual
+                if (task.individual) valveAmounts = ArrayList((1..32).map { if (it in ValveAmounts.slots(task.mask)) task.target(it).toString() else "500" })
+                else amount = VolumeRules.snap(task.ml).toString()
             }
         }
     }
@@ -76,10 +83,10 @@ internal fun PumpApp(model: MasterControlViewModel) {
 
     if (confirmStart) AlertDialog(
         onDismissRequest = { confirmStart = false }, title = { Text("确认本次出水") },
-        text = { Text("阀门：${MasterProtocol.slots(mask)}\n每路 $amount mL × $count 路 = 总目标 ${(ml ?: 0) * count} mL\n按编号顺序执行，每路最长 $seconds 秒。\n\n手机断连后，已接受的任务继续执行。") },
+        text = { Text("阀门：${MasterProtocol.slots(mask)}\n${if (individual) ValveAmounts.slots(mask).joinToString("、") { "${alias(it)} ${valveAmounts[it - 1]} mL" } else "每路 $amount mL × $count 路"}\n总目标 $draftTotal mL\n按编号顺序执行，每路最长 $seconds 秒。\n\n手机断连后，已接受的任务继续执行。") },
         confirmButton = { TextButton(onClick = {
             confirmStart = false
-            if (valid && ui.canStart) { model.start(mask, ml!!, maxSeconds!!); showDraft = false }
+            if (valid && ui.canStart) { model.start(mask, if (individual) 0 else ml!!, maxSeconds!!, encodedAmounts ?: ""); showDraft = false }
         }, enabled = valid && ui.canStart) { Text("确认启动") } },
         dismissButton = { TextButton(onClick = { confirmStart = false }) { Text("取消") } }
     )
@@ -103,12 +110,12 @@ internal fun PumpApp(model: MasterControlViewModel) {
         val target = ui.slaves?.firstOrNull { it.slot == commissionSlot }
         AlertDialog(
             onDismissRequest = { commissionSlot = 0 },
-            title = { Text("投产配置 · ${commissionSlot.toString().padStart(2, '0')} 号阀门") },
-            text = { Text("确认已现场检查阀门和流量计接线、核对流量系数 K，并确认安全互锁有效。确认后该从机将允许接受出水任务。此操作只保存配置，不会启动水泵或阀门。") },
+            title = { Text("启用配置 · ${commissionSlot.toString().padStart(2, '0')} 号阀门") },
+            text = { Text("确认已现场检查阀门和流量计接线、核对流量系数 K，并确认安全互锁有效。确认后该阀门将允许接受出水任务。此操作只保存配置，不会启动水泵或阀门。") },
             confirmButton = { TextButton(onClick = {
                 commissionSlot = 0
                 model.commissionSlave(target?.slot ?: 0)
-            }, enabled = target != null && ui.canCommission(target)) { Text("确认投产") } },
+            }, enabled = target != null && ui.canCommission(target)) { Text("确认启用") } },
             dismissButton = { TextButton(onClick = { commissionSlot = 0 }) { Text("取消") } }
         )
     }
@@ -126,7 +133,10 @@ internal fun PumpApp(model: MasterControlViewModel) {
     if (showConnection) ConnectionSheet(ui, model) { showConnection = false }
 
     Scaffold(topBar = {
-        TopAppBar(
+        if (tab == 0 && taskPage == "home" && showDraft && !unresolved) {
+            Spacer(Modifier.statusBarsPadding())
+        } else TopAppBar(
+            modifier = if (tab == 1) Modifier.height(56.dp) else Modifier,
             navigationIcon = {
                 if (tab == 0 && (taskPage != "home" || unresolved || task?.outcome == MasterOutcome.FINISHED && !showDraft)) {
                     IconButton(onClick = {
@@ -153,7 +163,7 @@ internal fun PumpApp(model: MasterControlViewModel) {
                             unresolved -> "正在出水"
                             task != null && task.outcome == MasterOutcome.FINISHED && !showDraft -> "出水完成"
                             else -> "泵阀控制"
-                        })
+                        }, style = if (tab == 1) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge)
                         if (taskPage == "select") Supporting("从机阀门 · 在线且已配置")
                         if (taskPage == "review") Supporting("核对参数后启动任务")
                     }
@@ -213,13 +223,26 @@ internal fun PumpApp(model: MasterControlViewModel) {
             if (taskPage == "home" || tab != 0) NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 listOf("控制" to R.drawable.ic_control, "设备" to R.drawable.ic_devices, "记录" to R.drawable.ic_records, "设置" to R.drawable.ic_settings).forEachIndexed { index, (label, icon) ->
                     NavigationBarItem(selected = tab == index, onClick = { tab = index; pumpDetail = false },
-                        icon = { Icon(painterResource(icon), null) }, label = { Text(label) })
+                        icon = { Icon(painterResource(icon), null) }, label = { Text(label) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        ))
                 }
             }
         }
     }) { insets ->
         val scroll = key(tab, pumpDetail, showDraft, showAddDevice) { rememberScrollState() }
-        Column(Modifier.fillMaxSize().padding(insets).imePadding().verticalScroll(scroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        val compactHome = tab == 0 && taskPage == "home" && showDraft && !unresolved
+        Column(Modifier.fillMaxSize().padding(insets).imePadding().verticalScroll(scroll).padding(horizontal = 14.dp,
+            vertical = if (compactHome) 2.dp else if (tab == 1) 6.dp else 12.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compactHome) 6.dp else if (tab == 1) 8.dp else 12.dp)) {
+            if (tab == 0 && taskPage == "home" && showDraft && !unresolved) {
+                HomeHeader(onSettings = { tab = 3; pumpDetail = false })
+            }
             if (tab != 0 || taskPage == "home" && showDraft && !unresolved) ConnectionSummary(ui, onClick = {
                 if (ui.connection is MasterConnectionState.Error && ui.retryDevice != null) model.retryConnection()
                 else showConnection = true
@@ -229,16 +252,18 @@ internal fun PumpApp(model: MasterControlViewModel) {
                     when {
                         taskPage == "select" -> ValveSelectionScreen(ui, mask, alias,
                             onMask = { mask = it }, onBack = { taskPage = "home" }, onReview = { taskPage = "review" })
-                        taskPage == "review" -> TaskReviewScreen(ui, mask, amount, seconds, alias,
+                        taskPage == "review" -> TaskReviewScreen(ui, mask, amount, seconds, individual, valveAmounts, valid, alias,
                             onBack = { taskPage = "select" }, onConfirm = { confirmStart = true })
                         task != null && (!showDraft || unresolved) -> {
                             TaskStatusHero(task, ui.report)
                             TaskDetails(task, ui.report ?: ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }?.report,
                                 ui.volume ?: ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }?.volume, ui.flows, alias,
-                                snapshot = !ui.connected || ui.report == null)
+                                snapshot = !ui.connected || ui.report == null,
+                                expectedFlowAddresses = ui.expectedFlowAddresses, nowElapsed = ui.flowClockAt)
                             OutlinedButton(onClick = model::query, enabled = ui.connected, modifier = Modifier.fillMaxWidth()) { Text("查询原任务") }
                             if (task.outcome == MasterOutcome.PENDING) OutlinedButton(onClick = { confirmRetry = true }, enabled = ui.canRetry, modifier = Modifier.fillMaxWidth()) { Text("重试原请求") }
-                            if (!unresolved) Button(onClick = { mask = 0; seconds = defaultSeconds; showDraft = true; taskPage = "home" }, enabled = !ui.unknownResult, modifier = Modifier.fillMaxWidth()) { Text("新建出水任务") }
+                            if (!unresolved) Button(onClick = { mask = 0; showDraft = true; taskPage = "home" },
+                                enabled = !ui.taskNeedsReconciliation && !ui.unknownResult, modifier = Modifier.fillMaxWidth()) { Text("新建出水任务") }
                         }
                         else -> {
                             if (ui.connected && !ui.canStart) ui.startBlockReason?.let { Feedback(it) }
@@ -246,7 +271,11 @@ internal fun PumpApp(model: MasterControlViewModel) {
                                 OutlinedButton(onClick = openPump, modifier = Modifier.fillMaxWidth()) { Text("查看并解除主机启动锁") }
                             }
                             if (ui.message != "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统 PIN 配对。" && ui.message != "主控已连接") Feedback(ui.message)
-                            TaskComposer(ui, mask, amount, seconds, ui.canStart, alias, { taskPage = "select" }, { amount = it }, { seconds = it }, { taskPage = "review" })
+                            TaskComposer(ui, mask, amount, seconds, ui.canStart, individual, valveAmounts, alias,
+                                onSelect = { taskPage = "select" }, onMask = { mask = it }, onAmount = { amount = it },
+                                onMode = { individual = it }, onValveAmount = { slot, value ->
+                                    valveAmounts = ArrayList(valveAmounts).also { it[slot - 1] = value }
+                                }, onReview = { taskPage = "review" })
                         }
                     }
                 }
@@ -257,13 +286,15 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         { confirmMeshReset = true }, { commissionSlot = it })
                 2 -> RecordsScreen(ui, alias) { previous ->
                     if (!unresolved && !ui.unknownResult) {
-                        mask = previous.mask and ui.selectableMask; amount = previous.ml.toString(); seconds = (previous.maxMs / 1000).toString()
+                        mask = previous.mask and ui.selectableMask
+                        individual = previous.individual
+                        if (previous.individual) valveAmounts = ArrayList((1..32).map { if (it in ValveAmounts.slots(previous.mask)) previous.target(it).toString() else "500" })
+                        else amount = VolumeRules.snap(previous.ml).toString()
                         showDraft = true; tab = 0; pumpDetail = false
                     }
                 }
-                3 -> SettingsScreen(ui, defaultSeconds) {
-                    defaultSeconds = it
-                    if (!unresolved) seconds = it
+                3 -> SettingsScreen(ui, seconds) {
+                    seconds = it
                     if (it.toLongOrNull()?.let { value -> value in 1..240 } == true) preferences.edit().putString("seconds", it).apply()
                 }
             }
@@ -273,29 +304,54 @@ internal fun PumpApp(model: MasterControlViewModel) {
 
 @Composable
 private fun ConnectionSummary(ui: MasterUiState, onClick: () -> Unit, onDisconnect: () -> Unit) {
-    val connectedGreen = Color(0xFF079455)
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-        Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(modifier = Modifier.size(48.dp).clickable(onClick = onClick), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primary) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(painterResource(R.drawable.ic_bluetooth), contentDescription = "连接主机", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(25.dp))
-                }
+    val connectedGreen = Color(0xFF159447)
+    val status = when (ui.connection) {
+        MasterConnectionState.Connected -> if (ui.hello == null) "核实中" else "已连接"
+        MasterConnectionState.Connecting -> "连接中"
+        is MasterConnectionState.Error -> "连接失败"
+        else -> "未连接"
+    }
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).clickable(onClickLabel = "蓝牙连接详情", onClick = onClick).heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(painterResource(R.drawable.ic_bluetooth), contentDescription = null,
+                    tint = if (ui.connected) connectedGreen else MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                Text(status, style = MaterialTheme.typography.labelMedium, maxLines = 1,
+                    color = if (ui.connected) connectedGreen else MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (ui.connected) ui.deviceName else "PUMP_MASTER", modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Column(Modifier.weight(1f).clickable(onClick = onClick), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Surface(modifier = Modifier.size(8.dp), shape = RoundedCornerShape(50), color = if (ui.connected) connectedGreen else MaterialTheme.colorScheme.outline) {}
-                    Text(when (ui.connection) {
-                        MasterConnectionState.Connected -> if (ui.hello == null) "正在核实主机" else "已连接"
-                        MasterConnectionState.Connecting -> "连接与配对中"
-                        is MasterConnectionState.Error -> "连接失败"
-                        else -> "未连接"
-                    }, style = MaterialTheme.typography.titleSmall, color = if (ui.connected) connectedGreen else MaterialTheme.colorScheme.onPrimaryContainer)
-                }
-                Text(if (ui.connected) ui.deviceName else "PUMP_MASTER", style = MaterialTheme.typography.bodyMedium)
-                Supporting(if (ui.connected) "${ui.slaves?.count { it.online } ?: 0} 台从机在线 · ${ui.pumpOutputLabel}" else "首次连接需在系统窗口完成 PIN 配对")
+            if (ui.connected) TextButton(onClick = onDisconnect, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text("断开", maxLines = 1)
+            } else TextButton(onClick = onClick, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text(when {
+                    ui.connection is MasterConnectionState.Connecting -> "查看"
+                    ui.connection is MasterConnectionState.Error && ui.retryDevice != null -> "重试"
+                    else -> "连接"
+                }, maxLines = 1)
             }
-            TextButton(onClick = if (ui.connected) onDisconnect else onClick) { Text(if (ui.connected) "断开" else "连接") }
+        }
+    }
+}
+
+@Composable
+private fun HomeHeader(onSettings: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            painterResource(R.drawable.ic_water),
+            contentDescription = null,
+            modifier = Modifier.size(28.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Text("泵阀控制", modifier = Modifier.weight(1f).padding(start = 8.dp),
+            style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
+            Icon(painterResource(R.drawable.ic_settings), contentDescription = "设置", modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

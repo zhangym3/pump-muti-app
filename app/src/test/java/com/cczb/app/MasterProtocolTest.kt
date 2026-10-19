@@ -102,4 +102,17 @@ class MasterProtocolTest {
         assertNull(MasterProtocol.parse("V job=7:1 total_ml=4294967296 measured=1"))
         assertNull(MasterProtocol.parse("V job=7:1 total_ml=100 total_ml=200 measured=1"))
     }
+
+    @Test fun flowSnapshotsCarryRevisionTerminalAndMeasurementMetadata() {
+        val flow = MasterProtocol.parse("FLOW addr=0002 job=7:1 pulses=123 ml=12 phase=DONE revision=8 terminal=1 measured=1")
+            as MasterMessage.Flow
+        assertEquals(123L, flow.pulses)
+        assertEquals(8L, flow.revision)
+        assertTrue(flow.terminal)
+        assertTrue(flow.measured)
+        val reboot = MasterProtocol.parse("FLOW addr=0002 job=7:1 pulses=0 ml=0 phase=FAULT revision=9 terminal=1 measured=0")
+            as MasterMessage.Flow
+        assertFalse(reboot.measured)
+        assertNull(MasterProtocol.parse("FLOW addr=0002 job=7:1 pulses=123 ml=12 phase=DONE revision=8 terminal=2 measured=1"))
+    }
 }

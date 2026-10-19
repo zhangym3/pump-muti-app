@@ -61,8 +61,22 @@ class MasterUiStateTest {
         assertFalse(ready.copy(task = finished, report = report).canStart)
         val saved = MasterHistoryEntry("AA:BB:CC:DD:EE:01", "主机", finished, 1, report)
         assertFalse(ready.copy(task = finished, history = listOf(saved)).canStart)
-        assertTrue(ready.copy(task = finished, report = report.copy(unknown = 0), history = listOf(saved)).canStart)
+        assertFalse(ready.copy(task = finished, report = report.copy(unknown = 0), history = listOf(saved)).canStart)
         assertFalse(ready.copy(historyHealthy = false).canStart)
         assertTrue(ready.copy(task = finished.copy(outcome = MasterOutcome.ACCEPTED), historyHealthy = false).canStop)
+    }
+
+    @Test fun finishedTaskNeedsVolumeAndEverySelectedNodeTerminalMeasurement() {
+        val finished = task.copy(outcome = MasterOutcome.FINISHED, job = MasterJobKey(7, 1))
+        val report = MasterMessage.Report(task.client, task.seq, "OK", finished.job, 6, 1, 1, 0, 0)
+        val volume = MasterMessage.Volume(finished.job!!, 500, 1)
+        val flow = MasterMessage.Flow(finished.job, 2, 500, "DONE", 500, 4, true, true, 1000)
+        val reconciled = ready.copy(task = finished, report = report, volume = volume, flows = mapOf(2L to flow))
+        assertTrue(reconciled.taskResultsComplete)
+        assertTrue(reconciled.canStart)
+        assertFalse(reconciled.copy(volume = null).canStart)
+        assertFalse(reconciled.copy(flows = emptyMap()).canStart)
+        assertFalse(reconciled.copy(inventoryFresh = false).canStart)
+        assertFalse(reconciled.copy(flows = mapOf(2L to flow.copy(measured = false))).canStart)
     }
 }
