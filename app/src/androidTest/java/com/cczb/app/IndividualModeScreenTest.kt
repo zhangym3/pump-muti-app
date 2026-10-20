@@ -32,7 +32,7 @@ class IndividualModeScreenTest {
         val state = mutableStateOf(ready)
         val selected = mutableLongStateOf(1)
         compose.setContent { PumpmutiappTheme { Column(Modifier.width(380.dp).verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            TaskComposer(state.value, selected.longValue, "500", "60", true, true, List(32) { "2000" },
+            TaskComposer(state.value, selected.longValue, "500", "60", true, List(32) { "2000" },
                 { "阀门 $it" }, {}, { selected.longValue = it }, {}, {}, { _, _ -> }, {})
         } } }
         val names = listOf(1, 2, 3, 32).map { "阀门 $it · ID ${it.toString().padStart(2, '0')} · 在线" }
@@ -55,7 +55,7 @@ class IndividualModeScreenTest {
         var values = List(32) { "2000" }
         compose.setContent { var amounts by remember { mutableStateOf(values) }
             PumpmutiappTheme { Column(Modifier.width(380.dp).verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                TaskComposer(ready.copy(slaves = ready.slaves!!.take(2)), 1, "500", "90", true, true, amounts,
+                TaskComposer(ready.copy(slaves = ready.slaves!!.take(2)), 1, "500", "90", true, amounts,
                     { "阀门 $it" }, {}, {}, {}, {}, { slot, value ->
                         amounts = amounts.toMutableList().also { it[slot - 1] = value }; values = amounts
                     }, {})
@@ -79,5 +79,68 @@ class IndividualModeScreenTest {
         compose.onNodeWithText("2100 mL").assertExists()
         compose.onNodeWithText("90 秒").assertExists()
         compose.onNodeWithText("确认选择并启动").performScrollTo().assertIsEnabled()
+    }
+
+    @Test fun emptySelectionExplainsWhyReviewIsDisabled() {
+        compose.setContent { PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+            TaskComposer(ready, 0, "500", "60", false, List(32) { "500" },
+                { "阀门 $it" }, {}, {}, {}, {}, { _, _ -> }, {})
+        } } }
+        compose.onNodeWithText("检查并启动").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("请至少选择一个在线且已启用的阀门。").assertExists()
+    }
+
+    @Test fun reviewCanOpenWhenHostIsBlockedButFinalStartCannot() {
+        val blocked = ready.copy(statusFresh = false)
+        compose.setContent {
+            var reviewing by remember { mutableStateOf(false) }
+            PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (reviewing) {
+                    TaskReviewScreen(blocked, 1, "500", "60", false, List(32) { "500" }, true,
+                        { "阀门 $it" }, {}, {})
+                } else {
+                    TaskComposer(blocked, 1, "500", "60", false, List(32) { "500" },
+                        { "阀门 $it" }, {}, {}, {}, {}, { _, _ -> }, { reviewing = true })
+                }
+            } }
+        }
+        compose.onNodeWithText("检查并启动").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("暂不可启动：主机状态已过期，请刷新或重新连接").assertExists()
+        compose.onNodeWithText("确认选择并启动").performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test fun blockedReviewCanQueryOldTaskWithoutEnablingStart() {
+        val task = MasterTask("a1", 1, 7, 1, 500, 60_000,
+            outcome = MasterOutcome.FINISHED, job = MasterJobKey(7, 1))
+        val report = MasterMessage.Report(task.client, task.seq, "OK", task.job, 6, 1, 1, 0, 0)
+        val blocked = ready.copy(task = task, report = report,
+            volume = MasterMessage.Volume(task.job!!, 500, 1))
+        var queried = false
+        compose.setContent { PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+            TaskReviewScreen(blocked, 1, "500", "60", false, List(32) { "500" }, true,
+                { "阀门 $it" }, {}, {}, { queried = true })
+        } } }
+
+        compose.onNodeWithText("阀门 1 缺少该任务的终态计量记录（FLOW）。").assertExists()
+        compose.onNodeWithText("确认选择并启动").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("查询原任务").performScrollTo().assertIsEnabled().performClick()
+        compose.runOnIdle { assertTrue(queried) }
+    }
+
+    @Test fun taskComposerSpeedPresetsSendOnlySpeedSelection() {
+        var selectedLevel = 0
+        var reviews = 0
+        val pwm = ready.copy(local = MasterMessage.Local(false, 0, "NONE", testSupported = true, pumpReady = true),
+            pwm = MasterPumpPwm().receive(MasterMessage.PumpPwm(7, 0, 1, 50, 20000, false, "OK"), 7), pwmFresh = true)
+        compose.setContent { PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+            TaskComposer(pwm, 1, "500", "60", false, List(32) { "500" },
+                { "阀门 $it" }, {}, {}, {}, {}, { _, _ -> }, { reviews++ }, { selectedLevel = it })
+        } } }
+
+        compose.onNodeWithText("低档 50%").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("中档 75%").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("高档 100%").performScrollTo().assertIsEnabled().performClick()
+        compose.runOnIdle { assertEquals(3, selectedLevel); assertEquals(0, reviews) }
+        compose.onNodeWithText("检查并启动").performScrollTo().assertIsEnabled()
     }
 }

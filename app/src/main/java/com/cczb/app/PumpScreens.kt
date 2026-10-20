@@ -25,10 +25,11 @@ import androidx.compose.ui.unit.sp
 
 @Composable
 internal fun TaskComposer(
-    ui: MasterUiState, mask: Long, amount: String, seconds: String, canStart: Boolean,
+    ui: MasterUiState, mask: Long, amount: String, seconds: String,
     individual: Boolean, amounts: List<String>, alias: (Int) -> String,
     onSelect: () -> Unit, onMask: (Long) -> Unit, onAmount: (String) -> Unit,
-    onMode: (Boolean) -> Unit, onValveAmount: (Int, String) -> Unit, onReview: () -> Unit
+    onMode: (Boolean) -> Unit, onValveAmount: (Int, String) -> Unit, onReview: () -> Unit,
+    onSpeed: (Int) -> Unit = {}
 ) {
     val ml = amount.toLongOrNull()
     val duration = seconds.toLongOrNull()
@@ -37,6 +38,17 @@ internal fun TaskComposer(
         (if (individual) plan != null && ui.hello?.individual == true else ml != null && VolumeRules.isValid(ml)) &&
         duration != null && duration in 1..240
     val count = java.lang.Long.bitCount(mask)
+    val draftBlockReason = when {
+        !ui.inventoryFresh -> "请连接主机并等待阀门清单同步。"
+        ui.selectableMask == 0L -> "没有在线且已启用的阀门，请先在设备页完成组网和现场配置。"
+        count == 0 -> "请至少选择一个在线且已启用的阀门。"
+        mask and ui.selectableMask.inv() != 0L -> "所选阀门状态已变化，请重新选择。"
+        individual && ui.hello?.individual != true -> "当前主机固件不支持单独设置任务；可切换为统一设置。"
+        individual && plan == null || !individual && (ml == null || !VolumeRules.isValid(ml)) ->
+            "请将所选阀门水量设为 50–2000 mL，且为 50 mL 的整数倍。"
+        duration == null || duration !in 1..240 -> "请在设置页将全局单路最长时间设为 1–240 秒。"
+        else -> null
+    }
     // Selection and background inventory refresh must never regroup the cards.
     val nodes = ui.slaves.orEmpty().filter { it.slot in 1..32 }.sortedBy { it.slot }
     val columns = if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 360 ||
@@ -60,6 +72,26 @@ internal fun TaskComposer(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Supporting("50 mL")
             Supporting("2000 mL")
+        }
+    }
+    PumpCard("水泵速度", icon = R.drawable.ic_power) {
+        Supporting("设置后续任务使用的速度；选择档位不会启动水泵。")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("低档 50%", "中档 75%", "高档 100%").forEachIndexed { index, label ->
+                FilterChip(selected = ui.pwm.snapshot?.level == index + 1,
+                    onClick = { onSpeed(index + 1) }, enabled = ui.canSetSpeed,
+                    label = { Text(label) }, modifier = Modifier.weight(1f))
+            }
+        }
+        val pwm = ui.pwm.snapshot
+        val pendingLevel = ui.pwm.pending?.level
+        when {
+            pendingLevel != null -> Supporting("等待主机确认：${listOf("低档 50%", "中档 75%", "高档 100%")[pendingLevel - 1]}")
+            pwm == null -> Supporting("主机档位未同步；连接主机并刷新后可选择。")
+            else -> Supporting("主机确认：${listOf("低档 50%", "中档 75%", "高档 100%")[pwm.level - 1]} · ${pwm.hz} Hz${if (ui.pwmFresh) "" else " · 状态已过期"}")
+        }
+        if (pendingLevel == null && ui.pwm.message != "已同步主机档位；选择档位不会启动水泵" && ui.pwm.message != "等待主机同步 PWM 档位") {
+            Supporting(ui.pwm.message)
         }
     }
     if (individual && ui.connected && ui.hello != null && !ui.hello.individual) {
@@ -104,7 +136,7 @@ internal fun TaskComposer(
             Text("按编号顺序", style = MaterialTheme.typography.bodyMedium)
         }
     }
-    Button(onClick = onReview, enabled = canStart && valid,
+    Button(onClick = onReview, enabled = valid,
         modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(15.dp)) {
         Icon(painterResource(R.drawable.ic_power), null, Modifier.size(21.dp))
         Spacer(Modifier.width(10.dp))
@@ -112,9 +144,7 @@ internal fun TaskComposer(
     }
     Text("$count 路 · ${if (individual) "单独设置" else "统一 $amount mL/路"}", Modifier.fillMaxWidth(),
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
-    if (count > 0 && (if (individual) plan == null else ml == null || !VolumeRules.isValid(ml)))
-        Feedback("请将所选阀门水量设为 50–2000 mL，且为 50 mL 的整数倍。")
-    if (duration == null || duration !in 1..240) Feedback("请在设置页将全局单路最长时间设为 1–240 秒。")
+    if (!valid && (nodes.isNotEmpty() || ui.inventoryFresh)) draftBlockReason?.let { Feedback(it) }
     Supporting("按编号逐路执行 · 已接受的任务不受手机断连影响")
 }
 
@@ -332,7 +362,7 @@ internal fun ValveSelectionScreen(ui: MasterUiState, mask: Long, alias: (Int) ->
 @Composable
 internal fun TaskReviewScreen(ui: MasterUiState, mask: Long, amount: String, seconds: String,
                               individual: Boolean, amounts: List<String>, valid: Boolean, alias: (Int) -> String,
-                              onBack: () -> Unit, onConfirm: () -> Unit) {
+                              onBack: () -> Unit, onConfirm: () -> Unit, onQuery: () -> Unit = {}) {
     val count = java.lang.Long.bitCount(mask)
     val ml = amount.toLongOrNull() ?: 0
     PumpCard("任务预览") {
@@ -346,6 +376,15 @@ internal fun TaskReviewScreen(ui: MasterUiState, mask: Long, amount: String, sec
         val total = if (individual) ValveAmounts.slots(mask).sumOf { amounts[it - 1].toLongOrNull() ?: 0 } else ml * count
         ReviewLine("目标总量", "$total mL")
         ReviewLine("单路时限", "$seconds 秒")
+    }
+    if (!valid) Feedback("任务参数已变化或无效，请返回修改。")
+    if (!ui.canStart) ui.startBlockReason?.let { Feedback("暂不可启动：$it") }
+    if (ui.taskNeedsReconciliation) {
+        for (detail in ui.taskReconciliationDetails) Feedback(detail)
+        OutlinedButton(onClick = onQuery, enabled = ui.connected,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            Text(if (ui.connected) "查询原任务" else "重新连接后查询原任务")
+        }
     }
     Feedback("启动前请确认供水与出水通路正常。启动后主机将逐路执行；手机断连不会取消已接受任务。")
     Button(onClick = onConfirm, enabled = ui.canStart && valid,

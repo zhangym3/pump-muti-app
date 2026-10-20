@@ -114,6 +114,58 @@ data class MasterUiState(
             flows[address]?.let { it.job == job && it.terminal && it.measured } == true
         } ?: false
     }
+    val taskReconciliationDetails: List<String> get() {
+        val currentTask = task ?: return emptyList()
+        if (currentTask.outcome == MasterOutcome.PENDING) {
+            return listOf("启动请求尚未得到主机确认；请查询原任务，勿重复启动。")
+        }
+        val job = currentTask.job
+        if (currentTask.unresolved) {
+            val activeReport = report?.takeIf {
+                it.client == currentTask.client && it.seq == currentTask.seq && it.job == job && it.mask == currentTask.mask
+            }
+            return listOf(if (activeReport != null && activeReport.phase < 6)
+                "主机报告任务仍在执行：${MasterProtocol.phase(activeReport.phase)}。"
+            else "等待主机确认任务终态；查询可核实任务是否已结束。")
+        }
+        if (currentTask.outcome != MasterOutcome.FINISHED) return emptyList()
+        if (job == null) return listOf("任务编号尚未确认，无法核对节点计量。")
+
+        val currentReport = report?.takeIf {
+            it.client == currentTask.client && it.seq == currentTask.seq && it.job == job && it.mask == currentTask.mask
+        }
+        if (currentReport == null) return listOf("缺少该任务匹配的主机报告（R）。")
+        if (currentReport.phase < 6) return listOf("主机报告任务仍在执行：${MasterProtocol.phase(currentReport.phase)}。")
+
+        val details = mutableListOf<String>()
+        if (currentReport.unknown != 0L) {
+            details += "以下阀门结果未知：${MasterProtocol.slots(currentReport.unknown and currentTask.mask)}。"
+        }
+        val terminal = currentReport.done or currentReport.failed or currentReport.unknown
+        val missingTerminal = currentTask.mask and terminal.inv()
+        if (missingTerminal != 0L) details += "以下阀门缺少终态结果：${MasterProtocol.slots(missingTerminal)}。"
+
+        val currentVolume = volume?.takeIf { it.job == job }
+        if (currentVolume == null) details += "缺少该任务的计量汇总（V）。"
+        else {
+            val missingMeasured = currentTask.mask and currentVolume.measured.inv()
+            if (missingMeasured != 0L) details += "以下阀门缺少有效计量：${MasterProtocol.slots(missingMeasured)}。"
+        }
+
+        val inventory = slaves.orEmpty().filter { it.slot in 1..32 }.associateBy { it.slot }
+        if (!inventoryFresh || (1..32).any { slot -> currentTask.mask and (1L shl (slot - 1)) != 0L && inventory[slot] == null }) {
+            details += "等待从机清单同步，暂时无法匹配阀门地址。"
+        } else {
+            (1..32).filter { currentTask.mask and (1L shl (it - 1)) != 0L }.forEach { slot ->
+                val address = inventory[slot]?.address ?: return@forEach
+                val flow = flows[address]
+                if (flow == null || flow.job != job || !flow.terminal || !flow.measured) {
+                    details += "阀门 $slot 缺少该任务的终态计量记录（FLOW）。"
+                }
+            }
+        }
+        return details.ifEmpty { listOf("节点与计量结果尚未完整同步。") }
+    }
     val taskNeedsReconciliation get() = task?.let {
         it.unresolved || it.outcome == MasterOutcome.FINISHED && !taskResultsComplete
     } == true

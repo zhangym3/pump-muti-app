@@ -253,7 +253,7 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         taskPage == "select" -> ValveSelectionScreen(ui, mask, alias,
                             onMask = { mask = it }, onBack = { taskPage = "home" }, onReview = { taskPage = "review" })
                         taskPage == "review" -> TaskReviewScreen(ui, mask, amount, seconds, individual, valveAmounts, valid, alias,
-                            onBack = { taskPage = "select" }, onConfirm = { confirmStart = true })
+                            onBack = { taskPage = "select" }, onConfirm = { confirmStart = true }, onQuery = model::query)
                         task != null && (!showDraft || unresolved) -> {
                             val historyEntry = ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }
                             TaskStatusHero(task, ui.report)
@@ -267,16 +267,16 @@ internal fun PumpApp(model: MasterControlViewModel) {
                                 enabled = !ui.taskNeedsReconciliation && !ui.unknownResult, modifier = Modifier.fillMaxWidth()) { Text("新建出水任务") }
                         }
                         else -> {
-                            if (ui.connected && !ui.canStart) ui.startBlockReason?.let { Feedback(it) }
+                            if (!ui.canStart && ui.inventoryFresh) ui.startBlockReason?.let { Feedback(it) }
                             if (ui.connected && ui.hello?.fault == "BOOT_LOCK") {
                                 OutlinedButton(onClick = openPump, modifier = Modifier.fillMaxWidth()) { Text("查看并解除主机启动锁") }
                             }
                             if (ui.message != "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统 PIN 配对。" && ui.message != "主控已连接") Feedback(ui.message)
-                            TaskComposer(ui, mask, amount, seconds, ui.canStart, individual, valveAmounts, alias,
+                            TaskComposer(ui, mask, amount, seconds, individual, valveAmounts, alias,
                                 onSelect = { taskPage = "select" }, onMask = { mask = it }, onAmount = { amount = it },
                                 onMode = { individual = it }, onValveAmount = { slot, value ->
                                     valveAmounts = ArrayList(valveAmounts).also { it[slot - 1] = value }
-                                }, onReview = { taskPage = "review" })
+                                }, onReview = { taskPage = "review" }, onSpeed = model::setSpeed)
                         }
                     }
                 }

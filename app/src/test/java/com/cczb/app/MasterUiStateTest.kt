@@ -79,4 +79,15 @@ class MasterUiStateTest {
         assertFalse(reconciled.copy(inventoryFresh = false).canStart)
         assertFalse(reconciled.copy(flows = mapOf(2L to flow.copy(measured = false))).canStart)
     }
+
+    @Test fun reconciliationDetailsIdentifyMissingNodeFlow() {
+        val finished = task.copy(outcome = MasterOutcome.FINISHED, job = MasterJobKey(7, 1))
+        val report = MasterMessage.Report(task.client, task.seq, "OK", finished.job, 6, 1, 1, 0, 0)
+        val volume = MasterMessage.Volume(finished.job!!, 500, 1)
+        val state = ready.copy(task = finished, report = report, volume = volume)
+
+        assertTrue(state.taskNeedsReconciliation)
+        assertFalse(state.canStart)
+        assertEquals(listOf("阀门 1 缺少该任务的终态计量记录（FLOW）。"), state.taskReconciliationDetails)
+    }
 }
