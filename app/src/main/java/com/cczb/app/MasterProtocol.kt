@@ -57,6 +57,7 @@ sealed interface MasterMessage {
     data class InventoryNode(val epoch: Long, val request: Long, val node: MasterSlave) : MasterMessage
     data class InventoryEnd(val epoch: Long, val request: Long, val count: Int) : MasterMessage
     data class Mesh(val epoch: Long, val request: Long, val state: MasterMeshState) : MasterMessage
+    data class Removal(val epoch: Long, val request: Long, val address: Long, val reply: String) : MasterMessage
     data class Candidate(val epoch: Long, val scan: Long, val uuid: String) : MasterMessage
     data class Commission(val epoch: Long, val request: Long, val slot: Int, val address: Long,
                           val reply: String, val commissioned: Boolean) : MasterMessage
@@ -211,7 +212,12 @@ object MasterProtocol {
                     fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: return null,
                     n("op") ?: return null, n("scan") ?: return null,
                     n("found")?.takeIf { it <= 8 }?.toInt() ?: return null,
-                    h("target")?.takeIf { it <= 0x7fff } ?: return null))
+                    h("target")?.takeIf { it <= 0x7fff } ?: return null,
+                    fields["remove"]?.let { (flag("remove") ?: return null) == 1L } ?: false))
+            "REMOVE" -> MasterMessage.Removal(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("req")?.takeIf { it > 0 } ?: return null,
+                h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
+                fields["reply"]?.takeIf { it in replies } ?: return null)
             "CAND" -> MasterMessage.Candidate(n("epoch")?.takeIf { it > 0 } ?: return null,
                 n("scan")?.takeIf { it > 0 } ?: return null,
                 fields["uuid"]?.takeIf { it.matches(Regex("[0-9a-fA-F]{32}")) }?.lowercase() ?: return null)
@@ -310,6 +316,8 @@ object MasterProtocol {
                 (uint(p[2]) ?: 0) > 0 && p[3] == "CONFIRM"
         }
         val p = command.split(' ')
+        if (p[0] == "mesh-remove") return p.size == 5 && (uint(p[1]) ?: 0) > 0 &&
+            (uint(p[2]) ?: 0) > 0 && (mask(p[3]) ?: 0) in 1..0x7fff && p[4] == "CONFIRM"
         if (p[0] in setOf("cal-get", "cal-set")) {
             if (p.size != (if (p[0] == "cal-set") 11 else 5) || (uint(p[1]) ?: 0) == 0L ||
                 (uint(p[2]) ?: 0) == 0L || (uint(p[3], 32) ?: 0) !in 1..32 ||

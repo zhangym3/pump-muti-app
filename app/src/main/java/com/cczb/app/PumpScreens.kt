@@ -466,12 +466,24 @@ internal fun LiveFlowPanel(ui: MasterUiState, alias: (Int) -> String) {
 }
 
 @Composable
+internal fun SlaveRemovalConfirmation(ui: MasterUiState, address: Long, alias: (Int) -> String,
+    onDismiss: () -> Unit, onConfirm: (Long) -> Unit) {
+    val target = ui.slaves?.firstOrNull { it.address == address }
+    val name = target?.takeIf { it.slot > 0 }?.let { alias(it.slot) } ?: "待配置从机"
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("确认删除从机") },
+        text = { Text("删除 $name（${addressLabel(address)}）后，将清除主机保存的该从机连接、登记和调校数据。主机会尝试通知从机退网；若从机离线或无回复，重新添加前需在从机本地清除 Mesh。") },
+        confirmButton = { TextButton(onClick = { if (target != null && ui.canRemoveSlave(target)) onConfirm(address) },
+            enabled = target != null && ui.canRemoveSlave(target)) { Text("确认删除") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+}
+
+@Composable
 internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: (Int) -> Unit, onPump: () -> Unit, onRefresh: () -> Unit,
                            showAddDevice: Boolean, onOpenAdd: () -> Unit,
                            onJoin: (String) -> Unit = {}, onRetry: (Long) -> Unit = {},
                            onResetMesh: () -> Unit = {}, onCommission: (Int) -> Unit = {},
                            onCloseAdd: () -> Unit = {}, pumpExpanded: Boolean = false,
-                           pumpContent: @Composable () -> Unit = {}) {
+                           pumpContent: @Composable () -> Unit = {}, onRemove: (Long) -> Unit = {}) {
     var showMaintenance by rememberSaveable { mutableStateOf(false) }
     MasterSummary(ui, onRefresh)
     PumpCard("水泵测试与调速", icon = R.drawable.ic_power, header = {
@@ -513,6 +525,9 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
             Supporting("${if (!ui.inventoryFresh) "状态待同步" else if (!node.online) "离线" else "在线"} · ${if (node.commissioned) "已启用" else "待启用配置"}")
                 }
                 if (slot > 0) TextButton(onClick = { onRename(slot) }) { Text("编辑") }
+                TextButton(onClick = { onRemove(node.address) }, enabled = ui.canRemoveSlave(node),
+                    modifier = Modifier.semantics { contentDescription = "删除从机 ${addressLabel(node.address)}" },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("删除") }
             }
             if (slot in 1..32 && !node.commissioned) {
                 OutlinedButton(onClick = { onCommission(slot) }, enabled = ui.canCommission(node),
@@ -527,6 +542,11 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
         if (ui.slaves.orEmpty().any { !it.online || it.slot == 0 })
             Supporting("离线或待启用配置的阀门不能执行出水任务。")
         if (ui.commissionMessage.isNotEmpty()) Feedback(ui.commissionMessage)
+        ui.removal?.let { Feedback(it.message) }
+        if (ui.removal == null && ui.mesh?.phase in setOf("REMOVING", "REMOVE_CLEANUP", "REMOVE_DONE"))
+            Feedback(ui.meshMessage)
+        if (ui.connected && ui.meshFresh && ui.mesh?.supportsRemoval == false && !ui.slaves.isNullOrEmpty())
+            Supporting("单台删除需要更新主机固件。")
     }
     TextButton(onClick = { showMaintenance = !showMaintenance }) {
         Text(if (showMaintenance) "收起维护" else "设备维护")

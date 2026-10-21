@@ -4,6 +4,12 @@ data class MasterSlave(val slot: Int, val address: Long, val online: Boolean, va
     val selectable get() = slot in 1..32 && online && commissioned
 }
 
+internal fun taskNodeAddresses(mask: Long, nodes: List<MasterSlave>): Map<Int, Long> {
+    val selected = (1..32).filter { mask and (1L shl (it - 1)) != 0L }.toSet()
+    val addresses = nodes.filter { it.slot in selected }.associate { it.slot to it.address }
+    return addresses.takeIf { it.keys == selected } ?: emptyMap()
+}
+
 /** A partial BLE stream must never replace the last complete inventory. */
 class MasterInventoryCollector(val epoch: Long, val request: Long) {
     private var expected: Int? = null
@@ -35,7 +41,8 @@ class MasterInventoryCollector(val epoch: Long, val request: Long) {
 
 data class MasterMeshState(
     val phase: String, val busy: Boolean, val capable: Boolean, val reason: String,
-    val operation: Long, val scan: Long, val found: Int, val target: Long
+    val operation: Long, val scan: Long, val found: Int, val target: Long,
+    val supportsRemoval: Boolean = false
 ) {
     val label get() = when (phase) {
         "STARTING" -> "正在初始化组网"
@@ -49,10 +56,15 @@ data class MasterMeshState(
         "CANCELLING" -> "正在结束超时的配对…"
         "RESETTING" -> "正在清除全部从机连接…"
         "RESET_DONE" -> "从机组网已重置"
+        "REMOVING", "REMOVE_CLEANUP" -> "正在删除从机 ${addressLabel(target)}…"
+        "REMOVE_DONE" -> if (reason == "REMOTE_RESET") "从机已删除，已收到退网确认"
+            else "从机已从主机删除；未确认从机退网，重新添加前请在从机本地清除 Mesh"
         "AUTO_MIGRATING" -> "主机正在重启，连接恢复后即可添加从机…"
         "LEGACY_NETWORK" -> "主机 Mesh 当前不可用，请重连或重置从机组网"
         "FAILED" -> "组网未完成：" + when (reason) {
-        "ENABLE_FAILED" -> "Master 无法启用 Provisioner，请检查 Mesh 初始化日志或固件状态"
+            "REMOVE_RESTART_REQUIRED" -> "删除未完成，请重启主机后刷新清单核实"
+            "REMOVE_STORAGE" -> "删除记录保存失败，请重启主机恢复后核实清单"
+            "ENABLE_FAILED" -> "Master 无法启用 Provisioner，请检查 Mesh 初始化日志或固件状态"
             "PROVISION_TIMEOUT" -> "配对超时，请靠近 Master 后重新扫描"
             "PROVISION_FAILED", "PROVISION_START" -> "配对失败，请检查从机网络状态后重新扫描"
             "CONFIG_TIMEOUT", "CONFIG_SEND" -> "配置通信超时，可刷新清单后重试连接配置"
@@ -62,5 +74,22 @@ data class MasterMeshState(
             else -> "请刷新状态并检查 Master 日志（$reason）"
         }
         else -> "组网状态：$phase"
+    }
+}
+
+data class MasterRemoval(
+    val epoch: Long, val request: Long, val address: Long, val slot: Int,
+    val pending: Boolean = true, val succeeded: Boolean = false,
+    val message: String = "已发送删除请求，等待主机确认"
+) {
+    fun receive(update: MasterMessage.Mesh): MasterRemoval {
+        val mesh = update.state
+        if (succeeded || update.epoch != epoch || mesh.operation != request || mesh.target != address) return this
+        return when (mesh.phase) {
+            "REMOVE_DONE" -> copy(pending = false, succeeded = true, message = mesh.label)
+            "FAILED" -> copy(pending = false, message = mesh.label)
+            "REMOVING", "REMOVE_CLEANUP" -> copy(message = mesh.label)
+            else -> this
+        }
     }
 }

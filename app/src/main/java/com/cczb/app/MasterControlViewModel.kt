@@ -19,6 +19,7 @@ data class MasterUiState(
     val hello: MasterMessage.Hello? = null, val task: MasterTask? = null,
     val report: MasterMessage.Report? = null, val volume: MasterMessage.Volume? = null,
     val flows: Map<Long, MasterMessage.Flow> = emptyMap(), val flowClockAt: Long = 0,
+    val taskAddresses: Map<Int, Long> = emptyMap(),
     val liveFlows: Map<Long, MasterMessage.Live> = emptyMap(),
     val storageHealthy: Boolean = true,
     val statusFresh: Boolean = false, val statusAt: Long? = null,
@@ -32,6 +33,7 @@ data class MasterUiState(
     val mesh: MasterMeshState? = null, val meshFresh: Boolean = false,
     val meshPending: Boolean = false, val candidates: List<String> = emptyList(),
     val meshMessage: String = "连接主机后可扫描附近从机",
+    val removal: MasterRemoval? = null,
     val commissionRequest: Long? = null, val commissionPendingSlot: Int? = null,
     val commissionMessage: String = "",
     val pwm: MasterPumpPwm = MasterPumpPwm(), val pwmFresh: Boolean = false,
@@ -60,6 +62,9 @@ data class MasterUiState(
         mesh?.capable == true && !managementBusy && storageHealthy && historyHealthy &&
         !unknownResult && !taskNeedsReconciliation && !pumpTestUnresolved && localFresh && local?.pumpCommand == false &&
         pwm.pending == null
+    fun canRemoveSlave(node: MasterSlave) = canManageMesh && inventoryFresh &&
+        mesh?.supportsRemoval == true && removal?.pending != true && commissionRequest == null &&
+        local?.testActive != true && slaves.orEmpty().any { it.address == node.address && it.slot == node.slot }
     val canResetBootLock get() = connected && statusFresh && hello?.role == "PUMP_MASTER" &&
         local?.pumpResetSupported == true &&
         hello.fault == "BOOT_LOCK" && hello.epoch > 0 && localFresh && local?.fault == "BOOT_LOCK" &&
@@ -73,7 +78,7 @@ data class MasterUiState(
     val canMeshProvision get() = connected && statusFresh && hello?.role == "PUMP_MASTER" &&
         meshFresh && mesh?.capable == true && !managementBusy &&
         !unknownResult && localFresh && local?.pumpCommand == false
-    val canScanMesh get() = canMeshProvision && mesh?.phase in setOf("IDLE", "SCAN_DONE")
+    val canScanMesh get() = canMeshProvision && mesh?.phase in setOf("IDLE", "SCAN_DONE", "READY", "REMOVE_DONE", "FAILED")
     val canJoinMesh get() = canMeshProvision && mesh?.phase == "SCAN_DONE" && candidates.isNotEmpty()
     fun canCommission(node: MasterSlave) = connected && statusFresh && hello?.role == "PUMP_MASTER" &&
         inventoryFresh && node.slot in 1..32 && node.online && !node.commissioned &&
@@ -97,7 +102,7 @@ data class MasterUiState(
         unknownResult -> "主机存在未确认的出水结果，请先查询结果后重试"
         localFresh && local?.pumpCommand == true -> "水泵输出已开启，请先停止水泵"
         !localFresh -> "水泵状态尚未同步，请点击刷新后重试"
-        mesh?.phase !in setOf("IDLE", "SCAN_DONE") -> "当前组网状态：${mesh?.label ?: "待同步"}"
+        mesh?.phase !in setOf("IDLE", "SCAN_DONE", "READY", "REMOVE_DONE", "FAILED") -> "当前组网状态：${mesh?.label ?: "待同步"}"
         else -> "主机暂时不可组网，请刷新状态后重试"
     }
     val unknownResult get() = task?.let { task ->
@@ -105,6 +110,7 @@ data class MasterUiState(
     } ?: false
     val expectedFlowAddresses: Set<Long>? get() {
         val currentTask = task ?: return null
+        if (taskAddresses.isNotEmpty()) return taskAddresses.values.toSet()
         if (!inventoryFresh) return null
         val selectedSlots = (1..32).filter { currentTask.mask and (1L shl (it - 1)) != 0L }.toSet()
         val bySlot = slaves.orEmpty().filter { it.slot in 1..32 }.associateBy { it.slot }
@@ -162,12 +168,12 @@ data class MasterUiState(
             if (missingMeasured != 0L) details += "以下阀门缺少有效计量：${MasterProtocol.slots(missingMeasured)}。"
         }
 
-        val inventory = slaves.orEmpty().filter { it.slot in 1..32 }.associateBy { it.slot }
-        if (!inventoryFresh || (1..32).any { slot -> currentTask.mask and (1L shl (slot - 1)) != 0L && inventory[slot] == null }) {
+        val addresses = taskAddresses.ifEmpty { if (inventoryFresh) taskNodeAddresses(currentTask.mask, slaves.orEmpty()) else emptyMap() }
+        if (addresses.isEmpty()) {
             details += "等待从机清单同步，暂时无法匹配阀门地址。"
         } else {
             (1..32).filter { currentTask.mask and (1L shl (it - 1)) != 0L }.forEach { slot ->
-                val address = inventory[slot]?.address ?: return@forEach
+                val address = addresses[slot] ?: return@forEach
                 val flow = flows[address]
                 if (flow == null || flow.job != job || !flow.terminal || !flow.measured) {
                     details += "阀门 $slot 缺少该任务的终态计量记录（FLOW）。"
@@ -275,6 +281,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     private var inventoryReceivedAt = 0L
     private var meshRequest = 0L
     private var meshSentAt = 0L
+    private var removalSentAt = 0L
     private var meshReceivedAt = 0L
     private var commissionSentAt = 0L
     private var pumpResetSentAt = 0L
@@ -283,6 +290,13 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         override fun run() {
             if (state.value.connected) {
                 val now = SystemClock.elapsedRealtime()
+                val removal = state.value.removal
+                if (removal?.pending == true && now - removalSentAt > 30_000) {
+                    state.value = state.value.copy(meshPending = false, meshFresh = false, inventoryFresh = false,
+                        removal = removal.copy(pending = false, message = "删除结果未确认，请刷新清单或重连核实；不会自动重发删除"))
+                    requestMeshState()
+                    requestInventory(force = true)
+                }
                 if (state.value.calibration.pending != null && now - calibrationSentAt > 8_000)
                     state.value = state.value.copy(calibration = state.value.calibration.uncertain(
                         "设备未确认调校结果，请重新读取；不会自动重发保存"))
@@ -302,9 +316,9 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
                     if (inventoryCollector == null && now - inventorySentAt > 10_000) requestInventory()
                     val mesh = state.value.mesh
                     val operationActive = mesh?.phase in setOf(
-                        "SCANNING", "JOINING", "CONFIGURING", "WAIT_HELLO", "CANCELLING", "RESETTING"
+                        "SCANNING", "JOINING", "CONFIGURING", "WAIT_HELLO", "CANCELLING", "RESETTING", "REMOVING", "REMOVE_CLEANUP"
                     )
-                    if (state.value.managementBusy && operationActive && now - meshSentAt >= 1_500) {
+                    if (state.value.managementBusy && (operationActive || state.value.meshPending) && now - meshSentAt >= 1_500) {
                         // Keep the operation request id: the Master tags MESH with
                         // this id and includes the scan's CAND entries in this reply.
                         meshSentAt = now
@@ -371,7 +385,8 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         val previous = current.history.firstOrNull { it.key == "$device/${task.client}/${task.seq}" }
         val entry = MasterHistoryEntry(device, current.deviceName, task, System.currentTimeMillis(),
             current.report?.copy(seq = task.seq) ?: previous?.report, current.volume ?: previous?.volume,
-            (previous?.flows ?: emptyMap()) + current.flows.mapValues { it.value.copy(receivedAt = 0) })
+            (previous?.flows ?: emptyMap()) + current.flows.mapValues { it.value.copy(receivedAt = 0) },
+            current.taskAddresses.ifEmpty { previous?.nodes ?: emptyMap() })
         if (current.historyHealthy && previous != null && entry.copy(updatedAt = previous.updatedAt) == previous) return
         val next = MasterHistory.upsert(current.history, entry)
         runCatching {
@@ -396,11 +411,16 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         meshRequest = 0L
         meshSentAt = 0L
         meshReceivedAt = 0L
+        val savedTask = ledger?.tasks?.get(address)
+        val savedNodes = state.value.history.firstOrNull {
+            savedTask != null && it.address == address && it.task.client == savedTask.client && it.task.seq == savedTask.seq
+        }?.nodes.orEmpty()
         state.value = state.value.copy(connection = MasterConnectionState.Connecting, hello = null, statusFresh = false, statusAt = null, report = null, volume = null, flows = emptyMap(), liveFlows = emptyMap(), local = null, localFresh = false, localAt = null, stopPending = false,
             slaves = null, inventoryFresh = false, inventoryLoading = false, mesh = null, meshFresh = false, meshPending = false, candidates = emptyList(),
             pwm = MasterPumpPwm(), pwmFresh = false, calibration = MasterCalibration(),
             pumpTest = ledger?.pumpTests?.get(address), testStopPending = false, testMessage = "正在同步原测试状态；不会自动重新启动",
-            task = ledger?.tasks?.get(address), deviceName = device.advertisedName ?: "Master ${address}", retryDevice = device,
+            task = savedTask, taskAddresses = savedNodes, removal = null,
+            deviceName = device.advertisedName ?: "Master ${address}", retryDevice = device,
             message = "正在连接；请完成系统 PIN 配对")
         manager.connect(device.device)
     }
@@ -425,7 +445,8 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         directStartReply = true
         stopSequence = null
         lastControlAt = SystemClock.elapsedRealtime()
-        state.value = state.value.copy(task = task, report = null, volume = null, flows = emptyMap(), liveFlows = emptyMap(), stopPending = false, message = "等待 Master 确认任务；请勿重复启动")
+        state.value = state.value.copy(task = task, taskAddresses = taskNodeAddresses(task.mask, state.value.slaves.orEmpty()),
+            report = null, volume = null, flows = emptyMap(), liveFlows = emptyMap(), stopPending = false, message = "等待 Master 确认任务；请勿重复启动")
         recordObservation()
         manager.sendCommand(task.command())
     }
@@ -512,7 +533,9 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     private fun resetMeshState() {
         inventoryCollector = null; inventorySentAt = 0; inventoryReceivedAt = 0; meshRequest = 0; meshSentAt = 0; meshReceivedAt = 0
         state.value = state.value.copy(slaves = null, inventoryFresh = false, inventoryLoading = false,
-            inventoryMessage = "从机清单待同步", mesh = null, meshFresh = false, meshPending = false, candidates = emptyList(), meshMessage = "组网状态待同步")
+            inventoryMessage = "从机清单待同步", mesh = null, meshFresh = false, meshPending = false, candidates = emptyList(), meshMessage = "组网状态待同步",
+            removal = state.value.removal?.takeIf { it.pending }?.copy(pending = false,
+                message = "连接中断，删除结果待核实；重连后请刷新清单，不会自动重发删除"))
     }
     private fun requestInventory(force: Boolean = false) {
         val current = state.value
@@ -528,8 +551,9 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     }
     private fun requestMeshState(force: Boolean = false) {
         val hello = state.value.hello ?: return
-        if (!state.value.connected || hello.role != "PUMP_MASTER" || state.value.managementBusy) return
-        meshRequest = nextRequest(); meshSentAt = SystemClock.elapsedRealtime()
+        if (!state.value.connected || hello.role != "PUMP_MASTER") return
+        if (!state.value.managementBusy || meshRequest == 0L) meshRequest = nextRequest()
+        meshSentAt = SystemClock.elapsedRealtime()
         manager.sendCommand("mesh-state ${hello.epoch} $meshRequest")
     }
     private fun meshCommand(command: String, argument: String = "", allowed: (MasterUiState) -> Boolean = { it.canManageMesh }) {
@@ -543,6 +567,17 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         if (!state.value.canResetMesh) return
         state.value = state.value.copy(meshPending = true, meshMessage = "已发送重置请求，等待 Master 清除从机并重启")
         manager.sendCommand("mesh-reset CONFIRM")
+    }
+    fun removeSlave(address: Long) {
+        val current = state.value
+        val node = current.slaves?.firstOrNull { it.address == address } ?: return
+        if (!current.canRemoveSlave(node)) return
+        val epoch = current.hello?.epoch ?: return
+        meshRequest = nextRequest(); meshSentAt = SystemClock.elapsedRealtime(); removalSentAt = meshSentAt
+        inventoryCollector = null
+        state.value = current.copy(meshPending = true, inventoryFresh = false, inventoryLoading = false,
+            removal = MasterRemoval(epoch, meshRequest, address, node.slot))
+        manager.sendCommand("mesh-remove $epoch $meshRequest ${address.toString(16)} CONFIRM")
     }
     fun resetBootLock() {
         val current = state.value
@@ -615,6 +650,16 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     override fun onDevicesChanged(devices: List<MasterDevice>) { state.value = state.value.copy(devices = devices) }
     override fun onError(message: String) { message(message) }
     override fun onCommandResult(command: String, success: Boolean, message: String) {
+        if (command.startsWith("mesh-remove ") && !success) {
+            val removal = state.value.removal
+            if (removal != null && removal.request == command.split(' ').getOrNull(2)?.toLongOrNull()) {
+                state.value = state.value.copy(meshPending = false, meshFresh = false, inventoryFresh = false,
+                    removal = removal.copy(pending = false, message = "$message；删除结果待核实，请刷新清单"))
+                requestMeshState()
+                requestInventory(force = true)
+            }
+            return
+        }
         if (!success && (command.startsWith("cal-get ") || command.startsWith("cal-set "))) {
             val pending = state.value.calibration.pending
             val parts = command.split(' ')
@@ -720,17 +765,40 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
             is MasterMessage.InventoryBegin, is MasterMessage.InventoryNode, is MasterMessage.InventoryEnd -> {
                 val complete = inventoryCollector?.accept(parsed) ?: return
                 inventoryCollector = null; inventoryReceivedAt = SystemClock.elapsedRealtime()
+                val beforeAddresses = state.value.taskAddresses
+                val bound = beforeAddresses.ifEmpty { state.value.task?.let { taskNodeAddresses(it.mask, complete) }.orEmpty() }
                 state.value = state.value.copy(slaves = complete, inventoryFresh = true, inventoryLoading = false,
-                    inventoryMessage = "已同步 ${complete.size} 台配对从机")
+                    taskAddresses = bound, inventoryMessage = "已同步 ${complete.size} 台配对从机")
+                if (bound != beforeAddresses) recordObservation()
             }
             is MasterMessage.Mesh -> {
                 if (parsed.epoch != state.value.hello?.epoch || parsed.request != meshRequest) return
                 val old = state.value.mesh
                 meshReceivedAt = SystemClock.elapsedRealtime()
+                val beforeRemoval = state.value.removal
+                val removal = beforeRemoval?.receive(parsed)
+                val finishedRemoval = beforeRemoval?.pending == true && removal?.pending == false
                 state.value = state.value.copy(mesh = parsed.state, meshFresh = true,
-                    meshPending = parsed.state.phase == "RESETTING",
+                    meshPending = parsed.state.phase == "RESETTING" || removal?.pending == true,
+                    removal = removal,
+                    calibration = if (beforeRemoval?.succeeded != true && removal?.succeeded == true &&
+                        state.value.calibration.address == removal.address)
+                        MasterCalibration() else state.value.calibration,
                     candidates = emptyList(), meshMessage = parsed.state.label)
-                if (old?.phase != parsed.state.phase && parsed.state.phase in setOf("READY", "FAILED")) requestInventory()
+                if (finishedRemoval || old?.phase != parsed.state.phase && parsed.state.phase in setOf("READY", "FAILED", "REMOVE_DONE")) {
+                    state.value = state.value.copy(inventoryFresh = false)
+                    requestInventory(force = true)
+                }
+            }
+            is MasterMessage.Removal -> {
+                val removal = state.value.removal ?: return
+                if (removal.succeeded) return
+                if ((parsed.epoch != removal.epoch && parsed.reply != "STALE") || parsed.request != removal.request || parsed.address != removal.address) return
+                state.value = state.value.copy(meshPending = false,
+                    removal = removal.copy(pending = false, message = "删除未接受：${commissionReplyLabel(parsed.reply)}"))
+                requestMeshState()
+                if (parsed.reply == "STALE") manager.requestState()
+                requestInventory(force = true)
             }
             is MasterMessage.Candidate -> {
                 val current = state.value

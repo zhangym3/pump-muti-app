@@ -12,7 +12,8 @@ data class MasterHistoryEntry(
     val updatedAt: Long,
     val report: MasterMessage.Report? = null,
     val volume: MasterMessage.Volume? = null,
-    val flows: Map<Long, MasterMessage.Flow> = emptyMap()
+    val flows: Map<Long, MasterMessage.Flow> = emptyMap(),
+    val nodes: Map<Int, Long> = emptyMap()
 ) {
     val key get() = "$address/${task.client}/${task.seq}"
 }
@@ -37,6 +38,7 @@ object MasterHistory {
             p.setProperty(prefix + "task", item.task.command())
             p.setProperty(prefix + "outcome", item.task.outcome.name)
             p.setProperty(prefix + "job", item.task.job?.toString() ?: "")
+            p.setProperty(prefix + "nodes", item.nodes.toSortedMap().entries.joinToString(",") { "${it.key}:${it.value.toString(16)}" })
             item.report?.let { r ->
                 p.setProperty(prefix + "report", "R client=${r.client} seq=${r.seq} reply=${r.reply} job=${r.job ?: "0:0"} phase=${r.phase} mask=${r.mask.toString(16)} done=${r.done.toString(16)} failed=${r.failed.toString(16)} unknown=${r.unknown.toString(16)} reason=${r.reason}")
             }
@@ -91,8 +93,17 @@ object MasterHistory {
                     .also { flow -> require(flow != null && flow.job == task.job) }!!
             }.associateBy { it.address }
             require(flows.size == flowCount)
+            val nodesText = p.getProperty(prefix + "nodes", "")
+            val nodeEntries = if (nodesText.isEmpty()) emptyList() else nodesText.split(',').map {
+                val pair = it.split(':'); require(pair.size == 2)
+                pair[0].toInt() to pair[1].toLong(16)
+            }
+            val nodes = nodeEntries.toMap()
+            require(nodes.size == nodeEntries.size && nodes.values.toSet().size == nodes.size)
+            require(nodes.all { (slot, addr) -> slot in 1..32 && addr in 1..0x7fff && task.mask and (1L shl (slot - 1)) != 0L })
+            require(nodes.isEmpty() || nodes.size == java.lang.Long.bitCount(task.mask))
             MasterHistoryEntry(address, p.getProperty(prefix + "name") ?: "主机", task,
-                p.getProperty(prefix + "time").toLong().also { require(it > 0) }, report, volume, flows)
+                p.getProperty(prefix + "time").toLong().also { require(it > 0) }, report, volume, flows, nodes)
         }.sortedByDescending { it.updatedAt }
     }
 }

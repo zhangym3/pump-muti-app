@@ -54,4 +54,32 @@ class MasterMeshScreenTest {
         compose.onNodeWithText("主机状态待同步").assertExists()
         compose.onNodeWithText("0/0 台从机在线", substring = true).assertDoesNotExist()
     }
+    @Test fun offlineDeleteTargetsTheAddressAndRequiresConfirmation() {
+        var selected = 0L; var removed = 0L
+        compose.setContent { var address by remember { mutableStateOf<Long?>(null) }
+            val current = ui.copy(mesh = ui.mesh!!.copy(supportsRemoval = true))
+            PumpmutiappTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    DevicesScreen(current, { "阀门 $it" }, {}, {}, {}, false, {}, {}, {}, {},
+                        onRemove = { selected = it; address = it })
+                }
+                address?.let { SlaveRemovalConfirmation(current, it, { "阀门 $it" },
+                    { address = null }, { target -> removed = target; address = null }) }
+            }
+        }
+        compose.onNodeWithContentDescription("删除从机 ${addressLabel(10)}").performScrollTo().assertIsEnabled().performClick()
+        compose.runOnIdle { assertEquals(10L, selected); assertEquals(0L, removed) }
+        compose.onNodeWithText("取消").performClick()
+        compose.runOnIdle { assertEquals(0L, removed) }
+        compose.onNodeWithContentDescription("删除从机 ${addressLabel(10)}").performScrollTo().performClick()
+        compose.onNodeWithText("确认删除").performClick()
+        compose.runOnIdle { assertEquals(10L, removed) }
+    }
+    @Test fun deletionConfirmationIsDisabledWhenTheInventoryBecomesStale() {
+        compose.setContent { PumpmutiappTheme {
+            SlaveRemovalConfirmation(ui.copy(mesh = ui.mesh!!.copy(supportsRemoval = true), inventoryFresh = false),
+                10, { "阀门 $it" }, {}, { error("Stale inventory must not allow deletion") })
+        } }
+        compose.onNodeWithText("确认删除").assertIsNotEnabled()
+    }
 }

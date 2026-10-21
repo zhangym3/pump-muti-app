@@ -50,6 +50,8 @@ internal fun PumpApp(model: MasterControlViewModel) {
     var confirmStart by remember { mutableStateOf(false) }
     var confirmRetry by remember { mutableStateOf(false) }
     var confirmMeshReset by remember { mutableStateOf(false) }
+    var removeAddress by remember { mutableStateOf<Long?>(null) }
+    var handledRemoval by rememberSaveable { mutableStateOf("") }
     var commissionSlot by rememberSaveable { mutableIntStateOf(0) }
     var renameSlot by rememberSaveable { mutableIntStateOf(0) }
     var renameText by rememberSaveable { mutableStateOf("") }
@@ -69,6 +71,16 @@ internal fun PumpApp(model: MasterControlViewModel) {
     LaunchedEffect(ui.slaves, ui.inventoryFresh) {
         if (ui.inventoryFresh && !unresolved) mask = mask and ui.selectableMask
     }
+    LaunchedEffect(ui.removal) {
+        ui.removal?.takeIf { it.succeeded && it.slot in 1..32 }?.let {
+            val identity = "${ui.deviceName}:${it.epoch}:${it.request}:${it.address}"
+            if (handledRemoval != identity) {
+                handledRemoval = identity
+                aliases.remove(it.slot)
+                preferences.edit().remove("slot.${it.slot}").apply()
+            }
+        }
+    }
     LaunchedEffect(unresolved, navigation.tab) {
         if (unresolved && navigation.tab == PumpTab.CONTROL) controlScroll.scrollTo(0)
     }
@@ -87,6 +99,13 @@ internal fun PumpApp(model: MasterControlViewModel) {
         confirmButton = { TextButton(onClick = { confirmRetry = false; model.retryOriginal() }, enabled = ui.canRetry) { Text("确认重试") } },
         dismissButton = { TextButton(onClick = { confirmRetry = false }) { Text("取消") } }
     )
+    if (removeAddress != null) {
+        SlaveRemovalConfirmation(ui, removeAddress!!, alias,
+            onDismiss = { removeAddress = null }, onConfirm = { address ->
+                removeAddress = null
+                model.removeSlave(address)
+            })
+    }
     if (confirmMeshReset) AlertDialog(
         onDismissRequest = { confirmMeshReset = false },
         title = { Text("确认重置从机组网") },
@@ -215,6 +234,7 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         showAddDevice = showAddDevice, onOpenAdd = { showAddDevice = true; model.scanSlaves() },
                         onJoin = model::joinSlave, onRetry = model::retrySlave, onResetMesh = { confirmMeshReset = true },
                         onCommission = { commissionSlot = it }, onCloseAdd = { showAddDevice = false },
+                        onRemove = { removeAddress = it },
                         pumpExpanded = navigation.pumpExpanded, pumpContent = {
                             PumpTestScreen(ui, duration, { duration = it }, model::refresh,
                                 { if (ui.canStartTest) model.startTest(duration) }, model::stopTest, model::setSpeed, model::resetBootLock)

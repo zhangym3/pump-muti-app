@@ -17,6 +17,25 @@ class MasterHistoryTest {
         assertFalse(restored.flows.getValue(2).isFresh(123))
     }
 
+    @Test fun taskAddressesSurviveRestartAndRejectIncompleteOrDuplicateBindings() {
+        val original = entry.copy(nodes = mapOf(1 to 2L, 32 to 33L))
+        assertEquals(original, MasterHistory.read(ByteArrayInputStream(bytes(listOf(original)))).single())
+        for (invalid in listOf("1:2", "1:2,32:2", "1:2,1:21", "1:8000,32:21", "0:2,32:21")) {
+            val p = Properties().apply {
+                load(ByteArrayInputStream(bytes(listOf(original))))
+                setProperty("record.0.nodes", invalid)
+            }
+            val corrupt = ByteArrayOutputStream().also { p.store(it, null) }.toByteArray()
+            assertThrows(Exception::class.java) { MasterHistory.read(ByteArrayInputStream(corrupt)) }
+        }
+        val legacy = Properties().apply {
+            load(ByteArrayInputStream(bytes(listOf(entry))))
+            remove("record.0.nodes")
+        }
+        val oldBytes = ByteArrayOutputStream().also { legacy.store(it, null) }.toByteArray()
+        assertTrue(MasterHistory.read(ByteArrayInputStream(oldBytes)).single().nodes.isEmpty())
+    }
+
     @Test fun oldHistoryWithoutReasonsOrFlowsStillLoadsAndInvalidFlowsFailClosed() {
         val original = Properties().apply { load(ByteArrayInputStream(bytes(listOf(entry)))) }
         original.remove("record.0.flowCount")

@@ -1,4 +1,25 @@
-# APP 1.2.1 交互改版验证
+# APP 验证记录
+
+## APP 1.2.2：单台删除从机
+
+2026-10-21，包名 `com.cczb.app`，versionCode 10。新增设备页「删除 → 确认删除」、旧固件能力门控、目标/请求精确匹配、离线结果提示、超时不重发以及任务地址快照保存。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| Debug APK | BUILD SUCCESSFUL；1.2.2 / 10 |
+| JVM 单元测试 | 106 项，0 失败、0 错误、0 跳过 |
+| Lint | 0 错误、0 Fatal、22 警告 |
+| Android UI 测试源码 | `compileDebugAndroidTestKotlin` 通过；新增删除确认和过期禁用测试，未执行 instrumentation |
+| 主机 | ESP32-S3 N16R8 / GPIO4 构建通过，删除状态机及旧任务地址快照回归、原有核心测试和 Mesh 仿真通过 |
+| 从机 | ESP32-C3 构建及 host tests 通过，增加 Node Reset 后关阀并重新待组网 |
+
+回归覆盖离线及待配置节点、严格命令边界、旧固件无能力声明、epoch/operation/地址不匹配拒绝、成功终态不回退、删除/复用槽位后旧任务仍可完成对账、历史绑定重启恢复及损坏数据拒绝。
+
+本轮未安装到手机、未刷写主从机、未执行泵阀操作，未验证真实蓝牙删除、掉电恢复及重加入网。不能据此判断此前新增从机失败已经解决。
+
+证据：[构建日志](../build/deletion-build.log)、[JVM 报告](../app/build/reports/tests/testDebugUnitTest/index.html)、[Lint](../app/build/reports/lint-results-debug.html)。产物：[Debug APK](../app/build/outputs/apk/debug/app-debug.apk)，SHA256 `39ec6b74a5b5eaea578f2fb0976327b7aaa5b8b06cf80617a69d77a4bc39f001`。
+
+## 历史：APP 1.2.1 交互改版验证
 
 2026-10-21，包名 `com.cczb.app`，versionCode 9。
 
