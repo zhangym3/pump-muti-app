@@ -1,6 +1,7 @@
 package com.cczb.app
 
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -33,8 +34,7 @@ class MasterControlScreenTest {
     }
     @Test fun disconnectedWaterTestIsBlockedWithoutConfirmationUi() {
         compose.onNodeWithText("设备").performClick()
-        compose.onNodeWithText("设备维护").performScrollTo().performClick()
-        compose.onNodeWithText("水泵测试与调速").performScrollTo().performClick()
+        compose.onNodeWithText("展开测试").performScrollTo().performClick()
         compose.onNodeWithText("通水测试").assertExists()
         compose.onNodeWithText("快速测试").assertDoesNotExist()
         compose.onNodeWithText("供水和出水通路已准备").assertDoesNotExist()
@@ -59,5 +59,29 @@ class MasterControlScreenTest {
         compose.onNodeWithText("90").assertExists()
         compose.onNodeWithText("控制").performClick()
         compose.onNodeWithText("单路最长时间（1–240 秒）").assertDoesNotExist()
+    }
+
+    @Test fun bottomTabsRemainAvailableAndBackOnlyAffectsTheVisibleTab() {
+        compose.onNodeWithText("设备").performClick()
+        compose.onNodeWithText("展开测试").performScrollTo().performClick()
+        compose.onNodeWithText("设置").performClick()
+        compose.onNodeWithText("设置").assertIsSelected()
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithText("控制").assertIsSelected()
+        compose.onNodeWithText("设备").performClick()
+        compose.onNodeWithText("收起测试").performScrollTo().assertExists()
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithText("设备").assertIsSelected()
+        compose.onNodeWithText("展开测试").assertExists()
+        compose.onNodeWithText("通水测试").assertDoesNotExist()
+    }
+
+    @Test fun closingConnectionReturnsToSameDraft() {
+        compose.onNodeWithContentDescription("出水量 mL").performScrollTo().performTextReplacement("750")
+        compose.onNodeWithText("连接").performClick()
+        compose.onNodeWithText("连接主机").assertExists()
+        compose.onNodeWithText("关闭").performScrollTo().performClick()
+        compose.onNodeWithText("控制").assertIsSelected()
+        compose.onNodeWithContentDescription("出水量 mL").performScrollTo().assertTextContains("750")
     }
 }

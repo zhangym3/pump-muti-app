@@ -40,8 +40,18 @@ class MasterResultMergeTest {
         val old = MasterMessage.Volume(job, 900, 1)
         val delayed = MasterMessage.Volume(job, 500, 0)
         assertEquals(old, MasterResultMerge.volume(old, delayed))
+        assertNull(MasterResultMerge.volume(null, delayed))
+        assertNull(MasterResultMerge.volume(old, MasterMessage.Volume(MasterJobKey(7, 2), 0, 0)))
         assertEquals(MasterMessage.Volume(job, 1100, 3),
             MasterResultMerge.volume(old, MasterMessage.Volume(job, 1100, 2)))
+    }
+
+    @Test fun volumeRequiresSelectedNodeCoverageButCanReportMeasuredZero() {
+        val mask = 0x5L
+        assertFalse(MasterResultMerge.hasVolumeData(MasterMessage.Volume(job, 0, 0), job, mask))
+        assertTrue(MasterResultMerge.hasVolumeData(MasterMessage.Volume(job, 0, 1), job, mask))
+        assertTrue(MasterResultMerge.hasVolumeData(MasterMessage.Volume(job, 500, mask), job, mask))
+        assertFalse(MasterResultMerge.hasVolumeData(MasterMessage.Volume(job, 500, 2), job, mask))
     }
 
     @Test fun flowRevisionRejectsOldSnapshotsAndRebootInvalidatesMeasurement() {

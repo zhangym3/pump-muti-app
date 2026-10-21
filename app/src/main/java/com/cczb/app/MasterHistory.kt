@@ -83,7 +83,7 @@ object MasterHistory {
             val volume = p.getProperty(prefix + "volume")?.let {
                 (MasterProtocol.parse(it) as? MasterMessage.Volume).also { v ->
                     require(v != null && v.job == task.job && v.measured and task.mask.inv() == 0L)
-                }
+                }?.takeIf { it.measured != 0L }
             }
             val flowCount = (p.getProperty(prefix + "flowCount") ?: "0").toInt().also { require(it in 0..32) }
             val flows = (0 until flowCount).map {

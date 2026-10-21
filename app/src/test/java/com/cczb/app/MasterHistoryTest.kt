@@ -71,6 +71,15 @@ class MasterHistoryTest {
         }
     }
 
+    @Test fun historyWithoutAnyVolumeCoverageLoadsAsPending() {
+        val p = Properties().apply {
+            load(ByteArrayInputStream(bytes(listOf(entry))))
+            setProperty("record.0.volume", "V job=7:1 total_ml=0 measured=0")
+        }
+        val saved = ByteArrayOutputStream().also { p.store(it, null) }.toByteArray()
+        assertNull(MasterHistory.read(ByteArrayInputStream(saved)).single().volume)
+    }
+
     @Test fun localOutputRequiresValidFlagsAndKnownPhase() {
         assertEquals(MasterMessage.Local(true, 2, "NONE"), MasterProtocol.parse("LOCAL pump_command=1 pump_phase=2 fault=NONE"))
         assertEquals(MasterMessage.Local(false, 4, "BOOT_LOCK"), MasterProtocol.parse("LOCAL pump_command=0 pump_phase=4 fault=BOOT_LOCK"))

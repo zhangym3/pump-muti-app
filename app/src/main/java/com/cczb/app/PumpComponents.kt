@@ -175,11 +175,12 @@ internal fun TaskDetails(
         Text(taskStatus(task, report), style = MaterialTheme.typography.headlineSmall)
         Supporting("$count 路 · ${task.amountLabel} · 按编号顺序执行")
         val total = task.totalMl
-        if (volume != null) {
-            Text("已收到 ${volume.ml} mL", style = MaterialTheme.typography.headlineSmall)
-            LinearProgressIndicator(progress = { (volume.ml.toFloat() / total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-            Supporting("总目标 $total mL · ${java.lang.Long.bitCount(volume.measured)}/$count 路有数据")
-            if (volume.measured != task.mask) Supporting("水量数据尚不完整，不能作为最终总量。")
+        val validVolume = volume.takeIf { MasterResultMerge.hasVolumeData(it, task.job, task.mask) }
+        if (validVolume != null) {
+            Text("已收到 ${validVolume.ml} mL", style = MaterialTheme.typography.headlineSmall)
+            LinearProgressIndicator(progress = { (validVolume.ml.toFloat() / total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            Supporting("总目标 $total mL · ${java.lang.Long.bitCount(validVolume.measured)}/$count 路有数据")
+            if (validVolume.measured != task.mask) Supporting("水量数据尚不完整，不能作为最终总量。")
         } else {
             Text("累计水量待确认", style = MaterialTheme.typography.titleMedium)
             Supporting("总目标 $total mL · 尚未收到计量数据")
@@ -200,7 +201,7 @@ internal fun TaskDetails(
                 val freshCount = selectedFlows.count { it.isFresh(nowElapsed) }
                 Supporting("节点终态 $terminalCount/${expectedFlowAddresses.size} · 有效计量 $measuredCount/${expectedFlowAddresses.size} · 新鲜数据 $freshCount/${expectedFlowAddresses.size}")
             }
-            val volumeComplete = volume?.let { it.job == task.job && (it.measured and task.mask) == task.mask } == true
+            val volumeComplete = validVolume?.let { (it.measured and task.mask) == task.mask } == true
             val nodesComplete = expectedFlowAddresses?.all {
                 flows[it]?.let { flow -> flow.job == task.job && flow.terminal && flow.measured } == true
             } == true

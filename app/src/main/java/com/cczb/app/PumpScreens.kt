@@ -2,8 +2,11 @@ package com.cczb.app
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
@@ -11,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -27,8 +31,8 @@ import androidx.compose.ui.unit.sp
 internal fun TaskComposer(
     ui: MasterUiState, mask: Long, amount: String, seconds: String,
     individual: Boolean, amounts: List<String>, alias: (Int) -> String,
-    onSelect: () -> Unit, onMask: (Long) -> Unit, onAmount: (String) -> Unit,
-    onMode: (Boolean) -> Unit, onValveAmount: (Int, String) -> Unit, onReview: () -> Unit,
+    onMask: (Long) -> Unit, onAmount: (String) -> Unit,
+    onMode: (Boolean) -> Unit, onValveAmount: (Int, String) -> Unit, onConfirm: () -> Unit,
     onSpeed: (Int) -> Unit = {}
 ) {
     val ml = amount.toLongOrNull()
@@ -54,35 +58,31 @@ internal fun TaskComposer(
     val columns = if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 360 ||
         androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.25f) 1 else 2
 
-    PumpCard("出水模式", icon = R.drawable.ic_control) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            ModeChoiceCard("统一设置", "所有选中阀门使用相同水量", !individual, true,
-                onClick = { onMode(false) }, modifier = Modifier.weight(1f))
-            ModeChoiceCard("单独设置", "为每个阀门独立设置水量", individual, true,
-                onClick = { onMode(true) }, modifier = Modifier.weight(1f))
-        }
-    }
-    if (!individual) PumpCard("统一出水量（mL）", accent = true) {
-        Supporting("范围 50–2000 mL · 步进 50 mL")
-        AmountPresets(amount, true, onAmount)
-        AmountEditor(amount, true, onAmount)
-        val current = VolumeRules.snap(ml ?: 500)
-        Slider(value = current.toFloat(), onValueChange = { onAmount(VolumeRules.snap(it.toLong()).toString()) },
-            valueRange = 50f..2000f, steps = 38)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Supporting("50 mL")
-            Supporting("2000 mL")
-        }
-    }
-    PumpCard("水泵速度", icon = R.drawable.ic_power) {
-        Supporting("设置后续任务使用的速度；选择档位不会启动水泵。")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("低档 50%", "中档 75%", "高档 100%").forEachIndexed { index, label ->
-                FilterChip(selected = ui.pwm.snapshot?.level == index + 1,
-                    onClick = { onSpeed(index + 1) }, enabled = ui.canSetSpeed,
-                    label = { Text(label) }, modifier = Modifier.weight(1f))
+    PumpCard("任务参数", icon = R.drawable.ic_water) {
+        Text("出水模式", style = MaterialTheme.typography.labelLarge)
+        SegmentedChoices(listOf("统一水量", "各路自定义"), if (individual) 1 else 0,
+            enabled = true, onSelected = { onMode(it == 1) })
+        if (individual) {
+            Supporting("各路水量在阀门卡片中设置 · 50–2000 mL · 步进 50 mL")
+        } else {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("每路目标水量", style = MaterialTheme.typography.labelLarge)
+                Text("50–2000 mL · 步进 50", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            AmountPresets(amount, true, onAmount)
+            AmountEditor(amount, true, onAmount)
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("本次速度", style = MaterialTheme.typography.labelLarge)
+            Supporting("选档不启动水泵")
+        }
+        SegmentedChoices(listOf("低档 50%", "中档 75%", "高档 100%"),
+            ui.pwm.snapshot?.level?.minus(1) ?: -1, enabled = ui.canSetSpeed,
+            onSelected = { onSpeed(it + 1) })
         val pwm = ui.pwm.snapshot
         val pendingLevel = ui.pwm.pending?.level
         when {
@@ -97,18 +97,23 @@ internal fun TaskComposer(
     if (individual && ui.connected && ui.hello != null && !ui.hello.individual) {
         Feedback("当前主机固件需更新后才能启动单独设置任务；可先编辑各路水量。")
     }
-    PumpCard("已选阀门（$count/${nodes.size}）", icon = R.drawable.ic_valve, header = {
-        TextButton(onClick = onSelect, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("修改选择  ›") }
+    PumpCard("选择出水阀门", icon = R.drawable.ic_valve, header = {
+        Text("已选 $count / ${nodes.size} 路", style = MaterialTheme.typography.labelMedium)
     }) {
         // A fixed status line avoids inserting/removing a full banner on every poll.
         Text(when {
             !ui.inventoryFresh -> ui.inventoryMessage
             ui.inventoryLoading -> "正在更新阀门状态…"
-            individual -> "每路 50–2000 mL · 步进 50 mL"
-            else -> "按编号排列 · 点击选择阀门"
+            individual -> "点选阀门，并在已选卡片中编辑各路目标量"
+            else -> "可多选 · 任务按阀门编号逐路执行"
         }, modifier = Modifier.fillMaxWidth().heightIn(min = 20.dp), maxLines = 1,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (nodes.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { onMask(ui.selectableMask) }, enabled = ui.inventoryFresh && ui.selectableMask != 0L) { Text("全选在线") }
+            TextButton(onClick = { onMask(ui.selectableMask and mask.inv()) }, enabled = ui.inventoryFresh && ui.selectableMask != 0L) { Text("反选") }
+            TextButton(onClick = { onMask(0) }, enabled = mask != 0L) { Text("清空") }
+        }
         if (nodes.isEmpty()) {
             Supporting(if (ui.inventoryFresh) "请前往设备页添加从机并完成启用配置。" else "请连接主机并等待阀门清单同步。")
         } else nodes.chunked(columns).forEach { pair ->
@@ -130,22 +135,58 @@ internal fun TaskComposer(
             }
         }
     }
-    PumpCard("执行顺序") {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(painterResource(R.drawable.ic_check), null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-            Text("按编号顺序", style = MaterialTheme.typography.bodyMedium)
-        }
-    }
-    Button(onClick = onReview, enabled = valid,
-        modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(15.dp)) {
+    val targetTotal = if (individual) ValveAmounts.slots(mask).sumOf { amounts[it - 1].toLongOrNull() ?: 0L }
+        else (ml ?: 0L) * count
+    TaskDraftSummary(count, targetTotal)
+    if (!ui.canStart && ui.connected) ui.startBlockReason?.let { Feedback("暂不可启动：$it") }
+    Button(onClick = onConfirm, enabled = valid && ui.canStart,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp), shape = RoundedCornerShape(15.dp)) {
         Icon(painterResource(R.drawable.ic_power), null, Modifier.size(21.dp))
         Spacer(Modifier.width(10.dp))
         Text("检查并启动", style = MaterialTheme.typography.titleSmall)
     }
-    Text("$count 路 · ${if (individual) "单独设置" else "统一 $amount mL/路"}", Modifier.fillMaxWidth(),
-        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
     if (!valid && (nodes.isNotEmpty() || ui.inventoryFresh)) draftBlockReason?.let { Feedback(it) }
-    Supporting("按编号逐路执行 · 已接受的任务不受手机断连影响")
+    Supporting("每路最长 $seconds 秒 · 任务接受后由主机继续执行")
+}
+
+@Composable
+private fun SegmentedChoices(options: List<String>, selected: Int, enabled: Boolean, onSelected: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        options.forEachIndexed { index, label ->
+            val active = index == selected
+            Surface(
+                modifier = Modifier.weight(1f).heightIn(min = 44.dp)
+                    .clickable(enabled = enabled, role = Role.RadioButton, onClick = { onSelected(index) })
+                    .semantics { this.selected = active; contentDescription = label.replace('\n', ' ') },
+                shape = RoundedCornerShape(7.dp),
+                color = if (active) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Transparent,
+                contentColor = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            ) {
+                Box(Modifier.fillMaxSize().padding(horizontal = 4.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
+                    Text(label, textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge,
+                        maxLines = 2, lineHeight = 17.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TaskDraftSummary(count: Int, targetTotal: Long) {
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Supporting("本次目标总量")
+                Text("$targetTotal mL", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+            }
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("$count 路阀门", style = MaterialTheme.typography.titleSmall)
+                Supporting("按编号逐路执行")
+            }
+        }
+    }
 }
 
 @Composable
@@ -199,53 +240,6 @@ private fun AmountEditor(value: String, enabled: Boolean, onValue: (String) -> U
 }
 
 @Composable
-private fun SectionIcon(icon: Int) {
-    Surface(shape = RoundedCornerShape(13.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-            Icon(painterResource(icon), null, modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
-        }
-    }
-}
-
-@Composable
-private fun ModeChoiceCard(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val border = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-    val fill = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surface
-    Surface(
-        modifier = modifier.heightIn(min = 82.dp).clickable(enabled = enabled, role = Role.RadioButton, onClick = onClick).semantics { this.selected = selected },
-        shape = RoundedCornerShape(14.dp),
-        color = fill,
-        border = BorderStroke(if (selected) 1.5.dp else 1.dp, border.copy(alpha = if (enabled) 1f else 0.7f))
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Surface(
-                modifier = Modifier.size(22.dp),
-                shape = RoundedCornerShape(50),
-                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
-                border = if (selected) null else BorderStroke(2.dp, MaterialTheme.colorScheme.outline)
-            ) {
-                if (selected) Box(Modifier.padding(6.dp).fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Surface(Modifier.fillMaxSize(), shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.onPrimary) {}
-                }
-            }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall,
-                    color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
-                Supporting(subtitle)
-            }
-        }
-    }
-}
-
-@Composable
 private fun ValveChoiceCard(
     node: MasterSlave,
     name: String,
@@ -263,8 +257,8 @@ private fun ValveChoiceCard(
         !node.online -> "离线" to MaterialTheme.colorScheme.error
         else -> "未配置" to MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Card(modifier = modifier.heightIn(min = 116.dp),
-        shape = RoundedCornerShape(17.dp), border = BorderStroke(if (selected) 1.5.dp else 1.dp, outline),
+    Card(modifier = modifier.heightIn(min = if (individual) 116.dp else 82.dp),
+        shape = RoundedCornerShape(8.dp), border = BorderStroke(if (selected) 1.5.dp else 1.dp, outline),
         colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else MaterialTheme.colorScheme.surface,
             disabledContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))) {
         Column(Modifier.fillMaxWidth().padding(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -272,9 +266,9 @@ private fun ValveChoiceCard(
                 this.selected = selected
                 contentDescription = "$name · ID ${node.slot.toString().padStart(2, '0')} · ${state.first}"
             }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Box(Modifier.size(22.dp).then(if (selected) Modifier else Modifier.border(1.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(7.dp))),
+                Box(Modifier.size(22.dp).then(if (selected) Modifier else Modifier.border(1.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(5.dp))),
                     contentAlignment = Alignment.Center) {
-                    if (selected) Surface(shape = RoundedCornerShape(7.dp), color = MaterialTheme.colorScheme.primary) {
+                    if (selected) Surface(shape = RoundedCornerShape(5.dp), color = MaterialTheme.colorScheme.primary) {
                         Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
                             Icon(painterResource(R.drawable.ic_check), null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onPrimary)
                         }
@@ -310,107 +304,164 @@ private fun ValveChoiceCard(
 }
 
 @Composable
-internal fun ValveSelectionScreen(ui: MasterUiState, mask: Long, alias: (Int) -> String,
-                                  onMask: (Long) -> Unit, onBack: () -> Unit, onReview: () -> Unit) {
-    var filter by rememberSaveable { mutableIntStateOf(0) }
-    val nodes = ui.slaves.orEmpty().filter { it.slot in 1..32 }.sortedBy { it.slot }
-    val visible = nodes.filter { when (filter) { 1 -> mask and (1L shl (it.slot - 1)) != 0L; 2 -> it.online; 3 -> !it.online; else -> true } }
-    val count = java.lang.Long.bitCount(mask)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        listOf("全部 ${nodes.size}", "已选 $count", "在线 ${nodes.count { it.online }}", "离线 ${nodes.count { !it.online }}").forEachIndexed { index, label ->
-            FilterChip(selected = filter == index, onClick = { filter = index }, label = { Text(label) }, modifier = Modifier.weight(1f))
-        }
-    }
-    Text(if (!ui.inventoryFresh) ui.inventoryMessage else if (ui.inventoryLoading) "正在更新阀门状态…" else "阀门状态已同步",
-        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 20.dp), style = MaterialTheme.typography.bodySmall)
-    if (nodes.isEmpty()) PumpCard("暂无可选阀门") { Supporting("请先在设备页添加从机并完成配置。") }
-    visible.forEach { node ->
-        val bit = 1L shl (node.slot - 1)
-        val selected = mask and bit != 0L
-        Card(onClick = { if (ui.inventoryFresh && node.selectable) onMask(mask xor bit) }, enabled = ui.inventoryFresh && node.selectable,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Surface(shape = RoundedCornerShape(8.dp), color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer) {
-                    Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-                        if (selected) Icon(painterResource(R.drawable.ic_check), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onPrimary)
-                        else Icon(painterResource(R.drawable.ic_devices), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                    }
+internal fun TaskStartConfirmation(ui: MasterUiState, mask: Long, amount: String, seconds: String,
+    individual: Boolean, amounts: List<String>, valid: Boolean, alias: (Int) -> String,
+    onDismiss: () -> Unit, onConfirm: () -> Unit, onQuery: () -> Unit = {}) {
+    val slots = ValveAmounts.slots(mask)
+    val total = if (individual) slots.sumOf { amounts[it - 1].toLongOrNull() ?: 0 } else (amount.toLongOrNull() ?: 0) * slots.size
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("确认本次出水") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Supporting("${slots.size} 路阀门 · 按编号顺序执行")
+                slots.forEach { slot -> ReviewLine(alias(slot), "${if (individual) amounts[slot - 1] else amount} mL") }
+                HorizontalDivider()
+                ReviewLine("目标总量", "$total mL")
+                ReviewLine("单路时限", "$seconds 秒")
+                ReviewLine("水泵速度", ui.pwm.snapshot?.let { listOf("低档 50%", "中档 75%", "高档 100%")[it.level - 1] } ?: "以主机当前档位为准")
+                if (!valid) Feedback("任务参数已变化或无效，请返回修改。")
+                if (!ui.canStart) ui.startBlockReason?.let { Feedback("暂不可启动：$it") }
+                if (ui.taskNeedsReconciliation) {
+                    ui.taskReconciliationDetails.forEach { Feedback(it) }
+                    OutlinedButton(onClick = onQuery, enabled = ui.connected) { Text("查询原任务") }
                 }
-                Column(Modifier.weight(1f)) {
-                    Text(alias(node.slot), style = MaterialTheme.typography.titleSmall)
-                    Supporting("${addressLabel(node.address)} · ${if (node.commissioned) "已配置" else "待配置"}")
-                }
-                StatePill(if (node.selectable) "在线" else if (!node.online) "离线" else "待配置", attention = !node.selectable)
+                Supporting("请确认供水与出水通路正常。手机断连后，已接受的任务继续执行。")
             }
-        }
-    }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = { onMask(ui.selectableMask) }, enabled = ui.inventoryFresh && ui.selectableMask != 0L, modifier = Modifier.weight(1f)) { Text("全选在线") }
-        OutlinedButton(onClick = { onMask(ui.selectableMask and mask.inv()) }, enabled = ui.inventoryFresh && ui.selectableMask != 0L, modifier = Modifier.weight(1f)) { Text("反选") }
-    }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text("已选 $count / ${nodes.size} 路", Modifier.weight(1f))
-        TextButton(onClick = { onMask(0) }, enabled = mask != 0L) { Text("清空") }
-    }
-    Button(onClick = onReview, enabled = ui.inventoryFresh && count > 0 && mask and ui.selectableMask.inv() == 0L,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("确认选择（$count）") }
-    TextButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("返回控制") }
-}
-
-@Composable
-internal fun TaskReviewScreen(ui: MasterUiState, mask: Long, amount: String, seconds: String,
-                              individual: Boolean, amounts: List<String>, valid: Boolean, alias: (Int) -> String,
-                              onBack: () -> Unit, onConfirm: () -> Unit, onQuery: () -> Unit = {}) {
-    val count = java.lang.Long.bitCount(mask)
-    val ml = amount.toLongOrNull() ?: 0
-    PumpCard("任务预览") {
-        Text("${count} 路阀门", style = MaterialTheme.typography.headlineSmall)
-        Supporting(MasterProtocol.slots(mask).split(',').joinToString("、") { alias(it.trim().toInt()) })
-        HorizontalDivider()
-        ReviewLine("执行顺序", "按编号顺序")
-        ReviewLine("出水模式", if (individual) "单独设置" else "统一设置")
-        if (individual) ValveAmounts.slots(mask).forEach { ReviewLine(alias(it), "${amounts[it - 1]} mL") }
-        else ReviewLine("每路水量", "$ml mL")
-        val total = if (individual) ValveAmounts.slots(mask).sumOf { amounts[it - 1].toLongOrNull() ?: 0 } else ml * count
-        ReviewLine("目标总量", "$total mL")
-        ReviewLine("单路时限", "$seconds 秒")
-    }
-    if (!valid) Feedback("任务参数已变化或无效，请返回修改。")
-    if (!ui.canStart) ui.startBlockReason?.let { Feedback("暂不可启动：$it") }
-    if (ui.taskNeedsReconciliation) {
-        for (detail in ui.taskReconciliationDetails) Feedback(detail)
-        OutlinedButton(onClick = onQuery, enabled = ui.connected,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            Text(if (ui.connected) "查询原任务" else "重新连接后查询原任务")
-        }
-    }
-    Feedback("启动前请确认供水与出水通路正常。启动后主机将逐路执行；手机断连不会取消已接受任务。")
-    Button(onClick = onConfirm, enabled = ui.canStart && valid,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp), shape = RoundedCornerShape(8.dp)) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("确认选择并启动")
-            Text("$count 路 · ${if (individual) "单独设置" else "$ml mL/路"} · 上限 $seconds 秒/路", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
-        }
-    }
-    TextButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("返回修改") }
+        },
+        confirmButton = { TextButton(onClick = onConfirm, enabled = valid && ui.canStart) { Text("确认启动") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("返回修改") } })
 }
 
 @Composable
 private fun ReviewLine(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Supporting(label)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Supporting(label, Modifier.weight(1f))
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
 @Composable
-internal fun SlotPager(group: Int, onGroup: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { onGroup(group - 1) }, enabled = group > 0) { Text("上一组") }
-        Text("${group * 8 + 1}–${group * 8 + 8}", style = MaterialTheme.typography.labelLarge)
-        TextButton(onClick = { onGroup(group + 1) }, enabled = group < 3) { Text("下一组") }
+internal fun CurrentTaskSection(ui: MasterUiState, alias: (Int) -> String, onQuery: () -> Unit, onRetry: () -> Unit) {
+    val task = ui.task ?: return
+    var details by rememberSaveable(task.client, task.seq) { mutableStateOf(false) }
+    val expanded = details || ui.taskNeedsReconciliation || ui.unknownResult
+    val saved = ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }
+    val report = ui.report ?: saved?.report
+    PumpCard(if (task.unresolved) "当前任务" else "最近一次任务", header = {
+        if (!ui.taskNeedsReconciliation && !ui.unknownResult)
+            TextButton(onClick = { details = !details }) { Text(if (expanded) "收起结果" else "展开结果") }
+    }) {
+        Text(taskStatus(task, report), style = MaterialTheme.typography.titleMedium)
+        Supporting("${java.lang.Long.bitCount(task.mask)} 路 · ${task.amountLabel} · 任务 ${task.job ?: "编号待确认"}")
+        TaskProgressSummary(ui, task)
+        LiveFlowPanel(ui, alias)
+        if (ui.taskNeedsReconciliation) ui.taskReconciliationDetails.forEach { Supporting(it) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onQuery, enabled = ui.connected) { Text("查询原任务") }
+            if (task.outcome == MasterOutcome.PENDING)
+                OutlinedButton(onClick = onRetry, enabled = ui.canRetry) { Text("重试原请求") }
+        }
+    }
+    if (expanded) TaskDetails(task, report, ui.volume ?: saved?.volume, saved?.flows.orEmpty() + ui.flows, alias,
+        snapshot = !ui.connected || ui.report == null,
+        expectedFlowAddresses = ui.expectedFlowAddresses, nowElapsed = ui.flowClockAt)
+}
+
+@Composable
+private fun TaskProgressSummary(ui: MasterUiState, task: MasterTask) {
+    val nodes = ui.slaves.orEmpty().associateBy { it.slot }
+    val slots = ValveAmounts.slots(task.mask)
+    val readings = slots.mapNotNull { slot ->
+        val address = nodes[slot]?.address ?: return@mapNotNull null
+        val final = ui.flows[address]?.takeIf { it.job == task.job && it.terminal }
+        val live = ui.liveFlows[address]?.takeIf { it.job == task.job }
+        (final?.takeIf { it.measured }?.ml ?: live?.ml)?.let { it }
+    }
+    val current = readings.sum()
+    val ended = slots.count { slot ->
+        val address = nodes[slot]?.address ?: return@count false
+        ui.flows[address]?.let { it.job == task.job && it.terminal } == true
+    }
+    val target = task.totalMl.coerceAtLeast(1L)
+    val percent = (current.toFloat() / target).coerceIn(0f, 1f)
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricBlock("目标总量", "${task.totalMl} mL", Modifier.weight(1f))
+                MetricBlock("已上报", if (readings.isEmpty()) "—" else "$current mL", Modifier.weight(1f))
+                MetricBlock("已结束路数", "$ended/${slots.size}", Modifier.weight(1f))
+            }
+            if (readings.isNotEmpty()) {
+                LinearProgressIndicator(progress = { percent }, modifier = Modifier.fillMaxWidth(),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant)
+            }
+            Supporting("已收到 ${readings.size}/${slots.size} 路计量数据")
+        }
+    }
+}
+
+@Composable
+private fun MetricBlock(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Supporting(label)
+        Text(value, style = MaterialTheme.typography.titleSmall)
+    }
+}
+
+@Composable
+internal fun LiveFlowPanel(ui: MasterUiState, alias: (Int) -> String) {
+    val task = ui.task ?: return
+    (1..32).filter { task.mask and (1L shl (it - 1)) != 0L }.forEach { slot ->
+        val node = ui.slaves.orEmpty().firstOrNull { it.slot == slot }
+        val final = node?.let { ui.flows[it.address] }?.takeIf { it.job == task.job && it.terminal }
+        val sample = node?.let { ui.liveFlows[it.address] }?.takeIf { it.job == task.job && ui.connected }
+        val fresh = sample?.isFresh(ui.flowClockAt) == true
+        val target = task.target(slot).coerceAtLeast(1L)
+        val currentMl = final?.takeIf { it.measured }?.ml ?: sample?.ml
+        val progress = ((currentMl ?: 0L).toFloat() / target).coerceIn(0f, 1f)
+        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                        Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                            Icon(painterResource(R.drawable.ic_water), contentDescription = null, Modifier.size(21.dp),
+                                tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        Text(alias(slot), style = MaterialTheme.typography.titleSmall)
+                        Supporting("目标 $target mL")
+                    }
+                    StatePill(when {
+                        final?.phase == "FAULT" -> "异常停止"
+                        final?.reason == "MANUAL" -> "已停止"
+                        final?.phase == "DONE" && final.reason == "TARGET" && final.measured -> "已完成"
+                        final != null -> "待核实"
+                        sample != null && fresh -> "抽水中"
+                        sample != null -> "数据过期"
+                        !task.unresolved -> "等待结果"
+                        else -> "等待数据"
+                    }, attention = final != null && (final.phase == "FAULT" || !final.measured))
+                }
+                if (currentMl != null) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant)
+                when {
+                    final != null -> {
+                        Text(if (final.measured) "最终出水 ${final.ml} mL · ${final.pulses} 脉冲" else "最终计量待核实")
+                        Supporting("已停止 · ${stopReasonLabel(final.reason)}")
+                    }
+                    sample != null -> {
+                        Text("累计 ${sample.ml} mL · ${sample.pulses} 脉冲")
+                        Text(if (fresh) "当前流速 ${sample.rateMlMin} mL/min" else "当前流速 —")
+                        Supporting(if (fresh) "实时更新 · 约每 2 秒" else "数据已过期，等待更新；累计量为上次快照")
+                    }
+                    else -> Supporting(when {
+                        !ui.connected -> "未连接主机，实时数据暂停"
+                        !task.unresolved || ui.stopPending -> "等待最终结果"
+                        else -> "等待实时数据"
+                    })
+                }
+            }
+        }
     }
 }
 
@@ -418,9 +469,18 @@ internal fun SlotPager(group: Int, onGroup: (Int) -> Unit) {
 internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: (Int) -> Unit, onPump: () -> Unit, onRefresh: () -> Unit,
                            showAddDevice: Boolean, onOpenAdd: () -> Unit,
                            onJoin: (String) -> Unit = {}, onRetry: (Long) -> Unit = {},
-                           onResetMesh: () -> Unit = {}, onCommission: (Int) -> Unit = {}) {
+                           onResetMesh: () -> Unit = {}, onCommission: (Int) -> Unit = {},
+                           onCloseAdd: () -> Unit = {}, pumpExpanded: Boolean = false,
+                           pumpContent: @Composable () -> Unit = {}) {
     var showMaintenance by rememberSaveable { mutableStateOf(false) }
     MasterSummary(ui, onRefresh)
+    PumpCard("水泵测试与调速", icon = R.drawable.ic_power, header = {
+        TextButton(onClick = onPump) { Text(if (pumpExpanded) "收起测试" else "展开测试") }
+    }) {
+        Supporting(ui.pumpOutputLabel)
+        if (!pumpExpanded) Supporting("在本页展开，选择速度与时长后测试。")
+    }
+    if (pumpExpanded) pumpContent()
     Button(onClick = onOpenAdd, enabled = ui.canRequestMeshScan, modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp)) {
         Text(when (ui.mesh?.phase) {
             "SCANNING" -> "正在搜索设备…"
@@ -438,6 +498,7 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
         if (ui.mesh?.phase == "SCAN_DONE" && ui.candidates.isEmpty())
             Supporting("没有发现可组网的从机。请检查供电后重新搜索。")
         if (ui.meshPending || ui.mesh?.phase in setOf("READY", "FAILED")) Feedback(ui.meshMessage)
+        TextButton(onClick = onCloseAdd) { Text("收起搜索结果") }
     }
     PumpCard("从机 · 阀门") {
         if (ui.slaves.isNullOrEmpty()) Supporting("尚未添加从机")
@@ -471,7 +532,6 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
         Text(if (showMaintenance) "收起维护" else "设备维护")
     }
     if (showMaintenance) {
-        OutlinedButton(onClick = onPump, modifier = Modifier.fillMaxWidth()) { Text("水泵测试与调速") }
         OutlinedButton(onClick = onResetMesh, enabled = ui.canResetMesh && !ui.meshPending,
             modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
             Text(if (ui.meshPending && ui.mesh?.phase == "RESETTING") "正在重置…" else "重置从机组网")
@@ -482,7 +542,7 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
 
 @Composable
 internal fun PumpTestScreen(ui: MasterUiState, duration: Int, onDuration: (Int) -> Unit,
-                            onBack: () -> Unit, onRefresh: () -> Unit,
+                            onRefresh: () -> Unit,
                             onStart: () -> Unit, onStop: () -> Unit, onSpeed: (Int) -> Unit = {},
                             onResetBootLock: () -> Unit = {}) {
     var confirmBootUnlock by rememberSaveable { mutableStateOf(false) }
@@ -497,9 +557,6 @@ internal fun PumpTestScreen(ui: MasterUiState, duration: Int, onDuration: (Int) 
         }, enabled = ui.canResetBootLock) { Text("确认解除") } },
         dismissButton = { TextButton(onClick = { confirmBootUnlock = false }) { Text("取消") } }
     )
-    TextButton(onClick = onBack) { Text("‹ 返回设备") }
-    Text("水泵设备", style = MaterialTheme.typography.headlineSmall)
-    Supporting(ui.hello?.let { "主机 ${addressLabel(it.master)} · 公共水泵" } ?: "主机 · 公共水泵")
     PumpCard("通水测试") {
         if (ui.local?.fault == "BOOT_LOCK") {
             val resetHint = if (!ui.local.pumpResetSupported) "当前主机固件不支持手机解除启动锁，请更新主机固件。" else "主机处于启动锁定，正常出水已禁用。"
@@ -516,7 +573,7 @@ internal fun PumpTestScreen(ui: MasterUiState, duration: Int, onDuration: (Int) 
         }
         HorizontalDivider()
         Supporting("选择档位和时长，点击启动测试；可随时停止。")
-        Text("PWM 调速 · GPIO25", style = MaterialTheme.typography.titleMedium)
+        Text("测试速度", style = MaterialTheme.typography.titleMedium)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("低档 50%", "中档 75%", "高档 100%").forEachIndexed { index, label ->
                 FilterChip(selected = ui.pwm.snapshot?.level == index + 1, onClick = { onSpeed(index + 1) },
@@ -557,37 +614,42 @@ internal fun PumpTestScreen(ui: MasterUiState, duration: Int, onDuration: (Int) 
 }
 
 @Composable
-internal fun RecordsScreen(ui: MasterUiState, alias: (Int) -> String, onDraft: (MasterTask) -> Unit) {
-    var selectedKey by rememberSaveable { mutableStateOf<String?>(null) }
-    val selected = ui.history.firstOrNull { it.key == selectedKey }
-    Text("任务记录", style = MaterialTheme.typography.titleLarge)
+internal fun RecordsScreen(ui: MasterUiState, alias: (Int) -> String, expandedKey: String?,
+    onToggle: (String) -> Unit, onDraft: (MasterTask) -> Unit) {
     if (!ui.historyHealthy) Feedback("本地记录保存或读取失败，当前记录可能不完整。")
-    if (selected != null) {
-        TextButton(onClick = { selectedKey = null }) { Text("‹ 返回记录列表") }
-        Supporting("${selected.deviceName} · 最后记录 ${displayTime(selected.updatedAt)}")
-        TaskDetails(selected.task, selected.report, selected.volume, selected.flows, alias = alias, snapshot = true)
-        OutlinedButton(onClick = { onDraft(selected.task) }, enabled = !ui.taskNeedsReconciliation && !ui.unknownResult && !selected.task.unresolved,
-            modifier = Modifier.fillMaxWidth()) { Text("以此新建任务") }
-        Supporting("只填入草稿，检查并确认后才会启动新的出水。")
-    } else {
-        Supporting("本手机保存的最近 ${MasterHistory.LIMIT} 项任务；未保存的历史无法自动补回。")
-        if (ui.history.isEmpty()) PumpCard("暂无任务记录") { Supporting("创建任务后，设备响应和已收到水量会保存在这里。") }
-        ui.history.forEach { entry ->
-            Card(onClick = { selectedKey = entry.key }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    Supporting("最近 ${MasterHistory.LIMIT} 项本机记录，点击卡片直接展开结果与脉冲。")
+    if (ui.history.isEmpty()) PumpCard("暂无任务记录") { Supporting("创建任务后，设备响应和已收到水量会保存在这里。") }
+    ui.history.forEach { entry ->
+        key(entry.key) {
+            val expanded = entry.key == expandedKey
+            Card(onClick = { onToggle(entry.key) }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = if (expanded) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Supporting("${entry.deviceName} · ${displayTime(entry.updatedAt)}")
                     Text("${java.lang.Long.bitCount(entry.task.mask)} 路 · ${entry.task.amountLabel}", style = MaterialTheme.typography.titleMedium)
                     Text(taskStatus(entry.task, entry.report), color = MaterialTheme.colorScheme.primary)
-                    Supporting("任务 ${entry.task.job ?: "待确认"} · ${entry.volume?.let { "已收到 ${it.ml} mL" } ?: "水量待确认"} ›")
+                    val volume = entry.volume.takeIf { MasterResultMerge.hasVolumeData(it, entry.task.job, entry.task.mask) }
+                    Supporting("任务 ${entry.task.job ?: "待确认"} · ${volume?.let { "已收到 ${it.ml} mL" } ?: "水量待确认"}")
+                    Text(if (expanded) "收起详情 ↑" else "查看结果与脉冲 ↓", style = MaterialTheme.typography.labelLarge)
                 }
+            }
+            if (expanded) {
+                TaskDetails(entry.task, entry.report,
+                    entry.volume.takeIf { MasterResultMerge.hasVolumeData(it, entry.task.job, entry.task.mask) },
+                    entry.flows, alias = alias, snapshot = true)
+                OutlinedButton(onClick = { onDraft(entry.task) },
+                    enabled = !ui.taskNeedsReconciliation && !ui.unknownResult && !entry.task.unresolved,
+                    modifier = Modifier.fillMaxWidth()) { Text("填入控制页草稿") }
+                Supporting("只复制参数；在控制页确认后才会启动出水。离线阀门不会选入草稿。")
             }
         }
     }
 }
 
 @Composable
-internal fun SettingsScreen(ui: MasterUiState, seconds: String, onSeconds: (String) -> Unit) {
+internal fun SettingsScreen(ui: MasterUiState, seconds: String, onSeconds: (String) -> Unit,
+    alias: (Int) -> String = { "${it} 号阀门" }, onSelectCalibration: (Int) -> Unit = {},
+    onReadCalibration: () -> Unit = {}, onSaveCalibration: (String, String, String) -> Unit = { _, _, _ -> }) {
     var advanced by rememberSaveable { mutableStateOf(false) }
     var diagnostics by rememberSaveable { mutableStateOf(false) }
     PumpCard("全局任务参数") {
@@ -596,6 +658,7 @@ internal fun SettingsScreen(ui: MasterUiState, seconds: String, onSeconds: (Stri
             isError = seconds.toLongOrNull()?.let { it in 1..240 } != true)
         Supporting("所有阀门、统一设置和单独设置共用此时限，新任务立即生效；正在执行的任务保持原时限。")
     }
+    CalibrationSettings(ui, alias, onSelectCalibration, onReadCalibration, onSaveCalibration)
     TextButton(onClick = { advanced = !advanced }) {
         Text(if (advanced) "收起高级设置" else "高级设置与诊断")
     }

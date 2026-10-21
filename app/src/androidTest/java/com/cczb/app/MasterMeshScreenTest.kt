@@ -27,14 +27,15 @@ class MasterMeshScreenTest {
     @Test fun sparseValveSelectionKeepsOfflineNodesOutOfTheTask() {
         compose.setContent { var mask by remember { mutableLongStateOf(0) }
             PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-                ValveSelectionScreen(ui, mask, { "阀门 $it" }, { mask = it }, {}, {})
+                TaskComposer(ui, mask, "500", "60", false, List(32) { "500" }, { "阀门 $it" },
+                    { mask = it }, {}, {}, { _, _ -> }, {})
             } }
         }
         compose.onNodeWithText("全选在线").performScrollTo().performClick()
         compose.onNodeWithText("已选 2 / 3 路").assertExists()
-        compose.onNodeWithText("阀门 9").performScrollTo().performTouchInput { click() }
+        compose.onNodeWithContentDescription("阀门 9 · ID 09 · 离线").performScrollTo().performTouchInput { click() }
         compose.onNodeWithText("已选 2 / 3 路").assertExists()
-        compose.onNodeWithText("确认选择（2）").performScrollTo().assertIsEnabled()
+        compose.onNodeWithText("检查并启动").performScrollTo().assertIsEnabled()
     }
     @Test fun scanAndJoinUseTheirOwnCallbacks() {
         var scans = 0; var joined = ""

@@ -48,6 +48,11 @@ fun commissionReplyLabel(reply: String): String = when (reply) {
 }
 
 sealed interface MasterMessage {
+    data class Calibration(val epoch: Long, val request: Long, val slot: Int, val address: Long,
+                           val revision: Long, val low: Long, val medium: Long, val high: Long,
+                           val reply: String, val baseK: Long, val baseVersion: Long) : MasterMessage {
+        val values get() = listOf(low, medium, high)
+    }
     data class InventoryBegin(val epoch: Long, val request: Long, val count: Int) : MasterMessage
     data class InventoryNode(val epoch: Long, val request: Long, val node: MasterSlave) : MasterMessage
     data class InventoryEnd(val epoch: Long, val request: Long, val count: Int) : MasterMessage
@@ -57,7 +62,7 @@ sealed interface MasterMessage {
                           val reply: String, val commissioned: Boolean) : MasterMessage
     data class Hello(val role: String, val address: Long, val master: Long, val epoch: Long,
                      val mesh: Boolean, val commissioned: Boolean, val fault: String,
-                     val individual: Boolean = false) : MasterMessage {
+                     val individual: Boolean = false, val calibration: Boolean = false) : MasterMessage {
         val ready get() = role == "PUMP_MASTER" && address == master && address in 1..0x7fff &&
             epoch > 0 && mesh && commissioned && fault == "NONE"
     }
@@ -65,6 +70,10 @@ sealed interface MasterMessage {
                       val phase: Int, val mask: Long, val done: Long, val failed: Long, val unknown: Long,
                       val reason: String = "UNKNOWN") : MasterMessage
     data class Volume(val job: MasterJobKey, val ml: Long, val measured: Long) : MasterMessage
+    data class Live(val job: MasterJobKey, val address: Long, val ml: Long, val pulses: Long,
+                    val runtimeMs: Long, val rateMlMin: Long, val receivedAt: Long = 0) : MasterMessage {
+        fun isFresh(now: Long) = receivedAt > 0 && now >= receivedAt && now - receivedAt <= 6_000
+    }
     data class Flow(
         val job: MasterJobKey,
         val address: Long,
@@ -174,6 +183,15 @@ object MasterProtocol {
         fun flag(name: String) = n(name)?.takeIf { it <= 1 }
         fun reason() = fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: if ("reason" in fields) null else "UNKNOWN"
         return when (parts.firstOrNull()) {
+            "CAL" -> MasterMessage.Calibration(n("epoch")?.takeIf { it > 0 } ?: return null,
+                n("req")?.takeIf { it > 0 } ?: return null, n("slot")?.takeIf { it in 1..32 }?.toInt() ?: return null,
+                h("addr")?.takeIf { it in 1..0x7fff } ?: return null, n("rev") ?: return null,
+                n("low")?.takeIf { it in 1..1_000_000 } ?: return null,
+                n("mid")?.takeIf { it in 1..1_000_000 } ?: return null,
+                n("high")?.takeIf { it in 1..1_000_000 } ?: return null,
+                fields["reply"]?.takeIf { it in replies } ?: return null,
+                n("bk")?.takeIf { it in 1..1_000_000 } ?: return null,
+                n("bv")?.takeIf { it > 0 } ?: return null)
             "INV_BEGIN", "INV_END" -> {
                 val epoch = n("epoch")?.takeIf { it > 0 } ?: return null
                 val req = n("req")?.takeIf { it > 0 } ?: return null
@@ -208,7 +226,8 @@ object MasterProtocol {
                 (flag("mesh") ?: return null) == 1L,
                 (flag("commissioned") ?: return null) == 1L,
                 fields["pump_fault"] ?: return null,
-                fields["individual"]?.let { (flag("individual") ?: return null) == 1L } ?: false)
+                fields["individual"]?.let { (flag("individual") ?: return null) == 1L } ?: false,
+                fields["calibration"]?.let { (flag("calibration") ?: return null) == 1L } ?: false)
             "LOCAL" -> {
                 val supported = fields["test_supported"]?.let { (flag("test_supported") ?: return null) == 1L } ?: false
                 val active = if (supported) (flag("test_active") ?: return null) == 1L else false
@@ -262,6 +281,11 @@ object MasterProtocol {
                     n("phase")?.takeIf { it <= 7 }?.toInt() ?: return null, selected, done, failed, unknown, reason() ?: return null)
             }
             "V" -> MasterMessage.Volume(key(fields["job"]) ?: return null, n("total_ml") ?: return null, h("measured") ?: return null)
+            "LIVE" -> MasterMessage.Live(key(fields["job"]) ?: return null,
+                h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
+                n("ml") ?: return null, n("pulses") ?: return null,
+                n("runtime_ms")?.takeIf { it in 1..240_000 } ?: return null,
+                n("rate_ml_min") ?: return null)
             "FLOW" -> {
                 val phase = fields["phase"]?.takeIf { it.matches(Regex("[A-Z_]{1,24}")) } ?: return null
                 val terminal = fields["terminal"]?.let { (flag("terminal") ?: return null) == 1L }
@@ -286,6 +310,13 @@ object MasterProtocol {
                 (uint(p[2]) ?: 0) > 0 && p[3] == "CONFIRM"
         }
         val p = command.split(' ')
+        if (p[0] in setOf("cal-get", "cal-set")) {
+            if (p.size != (if (p[0] == "cal-set") 11 else 5) || (uint(p[1]) ?: 0) == 0L ||
+                (uint(p[2]) ?: 0) == 0L || (uint(p[3], 32) ?: 0) !in 1..32 ||
+                (mask(p[4]) ?: 0) !in 1..0x7fff) return false
+            return p[0] == "cal-get" || uint(p[5]) != null && (uint(p[6], 1_000_000) ?: 0) > 0 &&
+                (uint(p[7]) ?: 0) > 0 && p.drop(8).all { (uint(it, 1_000_000) ?: 0) > 0 }
+        }
         if (p.size == 1) return command == "hello" || command == "local"
         if (p[0] == "commission") return p.size == 5 &&
             (uint(p[1]) ?: 0) > 0 && (uint(p[2]) ?: 0) > 0 && (uint(p[3], 32) ?: 0) in 1..32 && p[4] == "CONFIRM"
@@ -338,8 +369,13 @@ object MasterResultMerge {
         )
     }
 
-    fun volume(old: MasterMessage.Volume?, incoming: MasterMessage.Volume): MasterMessage.Volume {
-        if (old == null || old.job != incoming.job) return incoming
+    fun hasVolumeData(volume: MasterMessage.Volume?, job: MasterJobKey?, mask: Long): Boolean =
+        volume != null && job != null && volume.job == job && volume.measured != 0L &&
+            volume.measured and mask.inv() == 0L
+
+    fun volume(old: MasterMessage.Volume?, incoming: MasterMessage.Volume): MasterMessage.Volume? {
+        if (old == null || old.job != incoming.job) return incoming.takeIf { it.measured != 0L }
+        if (incoming.measured == 0L) return old
         return incoming.copy(ml = maxOf(old.ml, incoming.ml), measured = old.measured or incoming.measured)
     }
 
@@ -369,7 +405,7 @@ fun stopReasonLabel(reason: String): String = when (reason) {
     "NONE" -> "尚无停止原因"
     "TARGET" -> "达到目标脉冲量"
     "MANUAL" -> "手动停止"
-    "LEASE" -> "租约证明超时，保护停止"
+    "LEASE" -> "租约失效，保护停止"
     "TRANSPORT" -> "Mesh 通信异常，保护停止"
     "PROTOCOL" -> "从机协议或能力不兼容"
     "NO_FLOW" -> "未检测到有效流量"

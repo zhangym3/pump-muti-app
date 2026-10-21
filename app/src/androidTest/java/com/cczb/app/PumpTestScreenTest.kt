@@ -30,7 +30,7 @@ class PumpTestScreenTest {
         var starts = 0
         compose.setContent {
             PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-                PumpTestScreen(ready, 3, {}, {}, {}, { starts++ }, {})
+                PumpTestScreen(ready, 3, {}, {}, { starts++ }, {})
             } }
         }
         compose.onNodeWithText("启动测试").performScrollTo().assertIsEnabled().performClick()
@@ -44,7 +44,7 @@ class PumpTestScreenTest {
             statusFresh = false, localFresh = false, storageHealthy = false)
         compose.setContent {
             PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-                PumpTestScreen(pending, 3, {}, {}, {}, {}, { stops++ })
+                PumpTestScreen(pending, 3, {}, {}, {}, { stops++ })
             } }
         }
         compose.onNodeWithText("启动测试").performScrollTo().assertIsNotEnabled()
@@ -60,7 +60,7 @@ class PumpTestScreenTest {
             MasterMessage.PumpPwm(7, 0, 1, 50, 20000, false, "OK"), 7))
         compose.setContent {
             PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-                PumpTestScreen(pwm, 3, {}, {}, {}, { starts++ }, {}, { level = it })
+                PumpTestScreen(pwm, 3, {}, {}, { starts++ }, {}, { level = it })
             } }
         }
         compose.onNodeWithText("中档 75%").performScrollTo().assertIsEnabled().performClick()
@@ -75,7 +75,7 @@ class PumpTestScreenTest {
         val pending = ready.copy(pwm = pwm, pwmFresh = false, pumpTest = MasterPumpTest("a1", 8, 7, 3000))
         compose.setContent {
             PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-                PumpTestScreen(pending, 3, {}, {}, {}, {}, { stops++ })
+                PumpTestScreen(pending, 3, {}, {}, {}, { stops++ })
             } }
         }
         compose.onNodeWithText("中档 75%").performScrollTo().assertIsNotEnabled()
@@ -89,7 +89,7 @@ class PumpTestScreenTest {
             local = ready.local!!.copy(fault = "BOOT_LOCK", phase = 4), pwmFresh = true,
             pwm = MasterPumpPwm(MasterMessage.PumpPwm(7, 0, 3, 100, 20000, false, "OK", true, 3000)))
         compose.setContent { PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-            PumpTestScreen(locked, 10, {}, {}, {}, { starts++ }, {})
+            PumpTestScreen(locked, 10, {}, {}, { starts++ }, {})
         } } }
         compose.onNodeWithText("通水测试").assertExists()
         compose.onNodeWithText("快速测试").assertDoesNotExist()
@@ -102,7 +102,7 @@ class PumpTestScreenTest {
         val pending = ready.copy(pumpTest = MasterPumpTest("a1", 8, 7, 3000),
             mesh = MasterMeshState("JOINING", true, true, "NONE", 1, 1, 1, 0))
         compose.setContent { PumpmutiappTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
-            PumpTestScreen(pending, 3, {}, {}, {}, {}, { stops++ })
+            PumpTestScreen(pending, 3, {}, {}, {}, { stops++ })
         } } }
         compose.onNodeWithText("启动测试").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("停止测试").assertIsEnabled().performClick()
