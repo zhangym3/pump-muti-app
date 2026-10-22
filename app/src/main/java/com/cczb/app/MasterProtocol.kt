@@ -53,6 +53,13 @@ sealed interface MasterMessage {
                            val reply: String, val baseK: Long, val baseVersion: Long) : MasterMessage {
         val values get() = listOf(low, medium, high)
     }
+    data class FlowCalibrationStatus(
+        val epoch: Long, val client: String, val request: Long, val job: MasterJobKey?,
+        val slot: Int, val address: Long, val phase: String, val operationSequence: Long,
+        val reply: String, val standardMl: Long, val speed: Int, val startPulses: Long,
+        val closePulses: Long, val finalPulses: Long, val livePulses: Long,
+        val runtimeMs: Long, val reason: String
+    ) : MasterMessage
     data class InventoryBegin(val epoch: Long, val request: Long, val count: Int) : MasterMessage
     data class InventoryNode(val epoch: Long, val request: Long, val node: MasterSlave) : MasterMessage
     data class InventoryEnd(val epoch: Long, val request: Long, val count: Int) : MasterMessage
@@ -63,7 +70,8 @@ sealed interface MasterMessage {
                           val reply: String, val commissioned: Boolean) : MasterMessage
     data class Hello(val role: String, val address: Long, val master: Long, val epoch: Long,
                      val mesh: Boolean, val commissioned: Boolean, val fault: String,
-                     val individual: Boolean = false, val calibration: Boolean = false) : MasterMessage {
+                     val individual: Boolean = false, val calibration: Boolean = false,
+                     val flowCalibration: Boolean = false) : MasterMessage {
         val ready get() = role == "PUMP_MASTER" && address == master && address in 1..0x7fff &&
             epoch > 0 && mesh && commissioned && fault == "NONE"
     }
@@ -157,8 +165,9 @@ data class MasterTask(
 
 object MasterProtocol {
     private const val U32 = 0xffff_ffffL
-    private val replies = setOf("OK", "BUSY", "INVALID", "STALE", "CONFLICT", "NOT_READY",
+    internal val repliesForLedger = setOf("OK", "BUSY", "INVALID", "STALE", "CONFLICT", "NOT_READY",
         "STORAGE", "UNAUTHORIZED", "OFFLINE", "CAPACITY", "PENDING", "UNKNOWN")
+    private val replies = repliesForLedger
     private val hex = Regex("[0-9a-fA-F]{1,16}")
     fun client(value: String): String? = value.takeIf { hex.matches(it) }
         ?.lowercase()?.trimStart('0')?.takeIf { it.isNotEmpty() }
@@ -184,6 +193,36 @@ object MasterProtocol {
         fun flag(name: String) = n(name)?.takeIf { it <= 1 }
         fun reason() = fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: if ("reason" in fields) null else "UNKNOWN"
         return when (parts.firstOrNull()) {
+            "FC" -> {
+                val sessionClient = client(fields["c"] ?: return null) ?: return null
+                val jobText = fields["j"] ?: return null
+                val job = if (jobText == "0:0") null else key(jobText) ?: return null
+                val phases = listOf("IDLE", "PREOUT", "MARK_PENDING", "MEASURING", "STOPPING", "COMPLETE", "INVALID", "UNKNOWN", "STARTING")
+                val repliesByCode = listOf("OK", "BUSY", "INVALID", "STALE", "CONFLICT", "NOT_READY", "STORAGE", "UNAUTHORIZED", "OFFLINE", "CAPACITY", "PENDING", "UNKNOWN")
+                val reasonsByCode = listOf("NONE", "TARGET", "MANUAL", "LEASE", "RUNTIME", "NO_FLOW", "PREPARE_TIMEOUT", "TAIL_FLOW", "LOCAL_INTERLOCK", "REBOOT", "PUMP_FAULT", "TRANSPORT", "PROTOCOL")
+                val phaseText = fields["p"] ?: return null
+                val phase = phaseText.toIntOrNull()?.let { phases.getOrNull(it) }
+                    ?: phaseText.takeIf { it in phases } ?: return null
+                val standardMl = n("ml")?.takeIf { it <= 2000 } ?: return null
+                val speed = n("v")?.takeIf { it <= 3 }?.toInt() ?: return null
+                if (phase != "IDLE" && (standardMl !in 50..2000 || speed !in 1..3)) return null
+                val replyText = fields["r"] ?: return null
+                val reply = replyText.toIntOrNull()?.let { repliesByCode.getOrNull(it) }
+                    ?: replyText.takeIf { it in replies } ?: return null
+                val reasonText = fields["w"] ?: return null
+                val reason = reasonText.toIntOrNull()?.let { reasonsByCode.getOrNull(it) }
+                    ?: reasonText.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: return null
+                MasterMessage.FlowCalibrationStatus(
+                    n("e")?.takeIf { it > 0 } ?: return null, sessionClient,
+                    n("q")?.takeIf { it > 0 } ?: return null, job,
+                    n("s")?.takeIf { it <= 32 }?.toInt() ?: return null,
+                    h("a")?.takeIf { it <= 0x7fff } ?: return null, phase,
+                    n("o") ?: return null, reply,
+                    standardMl, speed,
+                    n("b") ?: return null, n("x") ?: return null, n("f") ?: return null,
+                    n("n") ?: return null, n("t") ?: return null,
+                    reason)
+            }
             "CAL" -> MasterMessage.Calibration(n("epoch")?.takeIf { it > 0 } ?: return null,
                 n("req")?.takeIf { it > 0 } ?: return null, n("slot")?.takeIf { it in 1..32 }?.toInt() ?: return null,
                 h("addr")?.takeIf { it in 1..0x7fff } ?: return null, n("rev") ?: return null,
@@ -233,7 +272,8 @@ object MasterProtocol {
                 (flag("commissioned") ?: return null) == 1L,
                 fields["pump_fault"] ?: return null,
                 fields["individual"]?.let { (flag("individual") ?: return null) == 1L } ?: false,
-                fields["calibration"]?.let { (flag("calibration") ?: return null) == 1L } ?: false)
+                fields["calibration"]?.let { (flag("calibration") ?: return null) == 1L } ?: false,
+                fields["flow_calibration"]?.let { (flag("flow_calibration") ?: return null) == 1L } ?: false)
             "LOCAL" -> {
                 val supported = fields["test_supported"]?.let { (flag("test_supported") ?: return null) == 1L } ?: false
                 val active = if (supported) (flag("test_active") ?: return null) == 1L else false
@@ -338,6 +378,18 @@ object MasterProtocol {
         }
         if (p[0] == "pump-speed") return p.size == 4 && (uint(p[1]) ?: 0) > 0 &&
             uint(p[2]) != null && (uint(p[3], 3) ?: 0) > 0
+        if (p[0] == "flow-cal-start") return p.size == 8 && (uint(p[1]) ?: 0) > 0 &&
+            client(p[2]) != null && (uint(p[3]) ?: 0) > 0 && (uint(p[4], 32) ?: 0) in 1..32 &&
+            (mask(p[5]) ?: 0) in 1..0x7fff && (uint(p[6], 2000) ?: 0) in 50..2000 &&
+            (uint(p[7], 3) ?: 0) in 1..3
+        if (p[0] in setOf("flow-cal-mark", "flow-cal-stop")) return p.size == 7 &&
+            (uint(p[1]) ?: 0) > 0 && client(p[2]) != null && (uint(p[3]) ?: 0) > 0 &&
+            (uint(p[4]) ?: 0) > 0 &&
+            ((uint(p[5]) ?: return false) > 0 && (uint(p[6]) ?: return false) > 0 ||
+                p[0] == "flow-cal-stop" && (uint(p[5]) ?: return false) == 0L && (uint(p[6]) ?: return false) == 0L)
+        if (p[0] == "flow-cal-query") return (p.size == 4 || p.size == 6) &&
+            (uint(p[1]) ?: 0) > 0 && client(p[2]) != null && (uint(p[3]) ?: 0) > 0 &&
+            (p.size == 4 || (((uint(p[4]) ?: return false) == 0L) == ((uint(p[5]) ?: return false) == 0L)))
         if (client(p.getOrNull(1) ?: return false) == null || (uint(p.getOrNull(2)) ?: 0) == 0L) return false
         return when (p[0]) {
             "query" -> p.size == 3

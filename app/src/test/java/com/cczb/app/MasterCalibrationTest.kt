@@ -1,5 +1,7 @@
 package com.cczb.app
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -16,6 +18,14 @@ class MasterCalibrationTest {
         hello = MasterMessage.Hello("PUMP_MASTER", 1, 1, 7, true, true, "NONE", calibration = true),
         statusFresh = true, slaves = listOf(MasterSlave(1, 2, true, true)), inventoryFresh = true,
         local = MasterMessage.Local(false, 0, "NONE"), localFresh = true, calibration = saved)
+
+    private fun flowStatus(phase: String, request: Long = 42, operation: Long = 0,
+                           job: MasterJobKey? = MasterJobKey(7, 8), start: Long = 0,
+                           close: Long = 0, final: Long = 0, live: Long = 0,
+                           epoch: Long = 7, client: String = "a1", slot: Int = 1,
+                           address: Long = 2, reply: String = "OK") =
+        MasterMessage.FlowCalibrationStatus(epoch, client, request, job, slot, address, phase,
+            operation, reply, 500, 1, start, close, final, live, 4000, "NONE")
 
     @Test fun decimalCoefficientsRetainExactThousandthsAndBounds() {
         assertEquals(5880L, FlowCalibration.parse("5.880"))
@@ -147,5 +157,97 @@ class MasterCalibrationTest {
         val task = MasterTask("a1", 1, 7, 1, 500, 60_000,
             outcome = MasterOutcome.ACCEPTED, job = MasterJobKey(7, 1))
         assertTrue(pending.copy(task = task).canStop)
+    }
+
+    @Test fun interactiveFlowCalibrationCommandsAndStatusesHaveStrictIdentity() {
+        val session = FlowCalibrationSession(7, "a1", 42, 1, 2, 500, 1)
+        assertEquals("flow-cal-start 7 a1 42 1 2 500 1", session.startCommand())
+        assertTrue(MasterProtocol.isAllowedCommand(session.startCommand()))
+        val startReply = "FC e=7 c=a1 q=42 j=7:8 s=1 a=0002 p=8 o=0 r=0 ml=500 v=1 b=0 x=0 f=0 n=0 t=0 w=0"
+        assertEquals("STARTING", (MasterProtocol.parse(startReply) as MasterMessage.FlowCalibrationStatus).phase)
+        listOf(startReply.replace("e=7", "e=0"), startReply.replace("q=42", "q=0"),
+            startReply.replace("p=8", "p=99"), startReply.replace("j=7:8", "j=7:0"),
+            startReply.replace("r=0", "r=99"), startReply.replace("ml=500", "ml=2001"),
+            startReply + " p=1").forEach { assertNull(it, MasterProtocol.parse(it)) }
+        listOf("flow-cal-mark 7 a1 42 1 7 8", "flow-cal-stop 7 a1 42 2 7 8",
+            "flow-cal-query 7 a1 42", "flow-cal-query 7 a1 42 7 8").forEach {
+            assertTrue(it, MasterProtocol.isAllowedCommand(it))
+            assertTrue(it.toByteArray().size <= 159)
+        }
+        listOf("flow-cal-start 7 a1 0 1 2 500 1", "flow-cal-start 7 a1 42 1 32768 500 1",
+            "flow-cal-start 7 a1 42 1 2 49 1", "flow-cal-start 7 a1 42 1 2 500 4",
+            "flow-cal-mark 7 a1 42 1 0 8", "flow-cal-stop 7 a1 42 2 7 0",
+            "flow-cal-query 7 a1 42 7 0").forEach { assertFalse(it, MasterProtocol.isAllowedCommand(it)) }
+    }
+
+    @Test fun manualMeasurementUsesAcknowledgedStartAndStopSnapshotsAndSeparatesTail() {
+        val initial = FlowCalibrationSession(7, "a1", 42, 1, 2, 500, 1)
+        val preout = initial.receive(flowStatus("PREOUT"), 7)
+        assertEquals("PREOUT", preout.phase)
+        assertTrue(preout.canMark)
+
+        val markPending = preout.requestedMark()
+        assertEquals("flow-cal-mark 7 a1 42 1 7 8", markPending.markCommand())
+        val measuring = markPending.receive(flowStatus("MEASURING", operation = 1, start = 12, live = 60), 7)
+        assertEquals("MEASURING", measuring.phase)
+        assertFalse(measuring.canMark)
+        assertNull(measuring.measuredPulses)
+
+        val stopping = measuring.requestedStop()
+        assertEquals("flow-cal-stop 7 a1 42 2 7 8", stopping.stopCommand())
+        assertEquals(stopping, stopping.requestedStop())
+        assertTrue(stopping.canStop)
+        val completed = stopping.receive(flowStatus("COMPLETE", operation = 2, start = 12,
+            close = 2952, final = 2970), 7)
+        assertEquals(2940L, completed.measuredPulses)
+        assertEquals(18L, completed.tailPulses)
+        assertEquals(5880L, completed.calculatedK)
+        assertFalse(completed.locked)
+        assertFalse(completed.canStop)
+
+        assertEquals(completed, completed.receive(flowStatus("MEASURING", operation = 1,
+            start = 12, live = 500), 7))
+        assertEquals(completed, completed.receive(flowStatus("INVALID", operation = 3,
+            epoch = 8, start = 12, close = 2952, final = 2970), 7))
+    }
+
+    @Test fun everyUnresolvedPhaseKeepsStopAvailableAndHostRestartBecomesUnknown() {
+        val session = FlowCalibrationSession(7, "a1", 42, 1, 2, 500, 1, MasterJobKey(7, 8))
+        listOf("START_PENDING", "STARTING", "PREOUT", "MARK_PENDING", "MEASURING", "STOPPING", "UNKNOWN")
+            .forEach { phase ->
+                val current = session.copy(phase = phase)
+                assertTrue("$phase must be stoppable", current.locked && current.canStop)
+                val expectedSequence = if (phase == "STOPPING") current.operationSequence else current.operationSequence + 1
+                assertEquals(expectedSequence, current.requestedStop().operationSequence)
+            }
+        val measuring = session.copy(phase = "MEASURING", operationSequence = 1, startPulses = 10)
+        val recovered = measuring.reconcileHostEpoch(8)
+        assertEquals("UNKNOWN", recovered.phase)
+        assertEquals("flow-cal-query 8 a1 42 7 8", recovered.queryCommand())
+        assertEquals("flow-cal-stop 8 a1 42 2 7 8", recovered.requestedStop().stopCommand())
+        val resumed = recovered.receive(flowStatus("MEASURING", operation = 1, start = 10, epoch = 8), 8)
+        assertEquals("MEASURING", resumed.phase)
+        assertEquals("OK", resumed.reply)
+        assertEquals("NONE", resumed.reason)
+        assertEquals(4000L, resumed.runtimeMs)
+        assertEquals(10L, resumed.startPulses)
+    }
+
+    @Test fun savingFlowCoefficientRequiresACompleteValidSampleAndRoundTripsLedger() {
+        val complete = FlowCalibrationSession(7, "a1", 42, 1, 2, 500, 1,
+            job = MasterJobKey(7, 8), phase = "COMPLETE", startPulses = 12,
+            closePulses = 2952, finalPulses = 2970)
+        assertTrue(ready.copy(flowCalibration = complete).canSaveFlowCoefficient)
+        assertFalse(ready.copy(flowCalibration = complete.copy(saved = true)).canSaveFlowCoefficient)
+        assertFalse(ready.copy(flowCalibration = complete.copy(closePulses = 12)).canSaveFlowCoefficient)
+        assertFalse(ready.copy(flowCalibration = complete, calibration = selected).canSaveFlowCoefficient)
+
+        val oldLedger = MasterLedger.read(ByteArrayInputStream("version=1\nclient=a1\nsequence=4\n".toByteArray()))
+        assertTrue(oldLedger.flowCalibrations.isEmpty())
+        val key = "AA:BB:CC:DD:EE:01"
+        val saving = complete.copy(calibrationSaveRequest = 43)
+        val ledger = MasterLedger("a1", 43, flowCalibrations = mapOf(key to saving))
+        val bytes = ByteArrayOutputStream().also(ledger::write).toByteArray()
+        assertEquals(ledger, MasterLedger.read(ByteArrayInputStream(bytes)))
     }
 }

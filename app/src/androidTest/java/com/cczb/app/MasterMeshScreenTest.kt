@@ -81,5 +81,21 @@ class MasterMeshScreenTest {
                 10, { "阀门 $it" }, {}, { error("Stale inventory must not allow deletion") })
         } }
         compose.onNodeWithText("确认删除").assertIsNotEnabled()
+        compose.onNodeWithText("从机清单已过期，请刷新并等待同步完成。", substring = true).assertExists()
+    }
+
+    @Test fun unsupportedFirmwareStillOpensRemovalDialogAndExplainsWhyItCannotProceed() {
+        compose.setContent { var address by remember { mutableLongStateOf(0L) }
+            PumpmutiappTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    DevicesScreen(ui, { "阀门 $it" }, {}, {}, {}, false, {}, onRemove = { address = it })
+                }
+                if (address != 0L) SlaveRemovalConfirmation(ui, address, { "阀门 $it" }, {},
+                    { error("Unsupported firmware must not allow deletion") })
+            }
+        }
+        compose.onNodeWithContentDescription("删除从机 ${addressLabel(10)}").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("确认删除").assertIsNotEnabled()
+        compose.onNodeWithText("当前主机固件不支持单台删除，请先更新主机固件。", substring = true).assertExists()
     }
 }

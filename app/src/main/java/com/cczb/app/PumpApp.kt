@@ -254,7 +254,12 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         seconds = it
                         if (it.toLongOrNull()?.let { value -> value in 1..240 } == true) preferences.edit().putString("seconds", it).apply()
                     }, alias = alias, onSelectCalibration = model::selectCalibration,
-                        onReadCalibration = model::readCalibration, onSaveCalibration = model::saveCalibration)
+                        onReadCalibration = model::readCalibration,
+                        onStartFlowCalibration = model::startFlowCalibration,
+                        onMarkFlowCalibration = model::markFlowCalibration,
+                        onStopFlowCalibration = model::stopFlowCalibration,
+                        onQueryFlowCalibration = model::queryFlowCalibration,
+                        onSaveFlowCalibration = model::saveFlowCalibrationCoefficient)
                 }
             }
         }

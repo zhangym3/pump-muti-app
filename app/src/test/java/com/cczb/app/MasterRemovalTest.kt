@@ -13,6 +13,7 @@ class MasterRemovalTest {
 
     @Test fun removalRequiresCurrentInventoryCapabilityAndIdleStateButAllowsOfflineAndPendingNodes() {
         assertTrue(ui.canRemoveSlave(node))
+        assertTrue(ui.canOpenSlaveRemoval(node))
         val pending = MasterSlave(0, 12, false, false)
         assertTrue(ui.copy(slaves = listOf(pending)).canRemoveSlave(pending))
         assertFalse(ui.copy(inventoryFresh = false).canRemoveSlave(node))
@@ -26,6 +27,20 @@ class MasterRemovalTest {
         assertFalse(ui.canRemoveSlave(node.copy(address = 11)))
         assertFalse(ui.canRemoveSlave(node.copy(slot = 8)))
         assertFalse(ui.copy(connection = MasterConnectionState.Disconnected).canRemoveSlave(node))
+    }
+
+    @Test fun unavailableRemovalExplainsTheBlockingPrerequisiteWhileKeepingTheEntryActionable() {
+        val legacy = ui.copy(mesh = mesh.copy(supportsRemoval = false))
+        assertTrue(legacy.canOpenSlaveRemoval(node))
+        assertFalse(legacy.canRemoveSlave(node))
+        assertTrue(legacy.slaveRemovalBlockReason(node)!!.contains("更新主机固件"))
+
+        val stale = ui.copy(inventoryFresh = false)
+        assertTrue(stale.canOpenSlaveRemoval(node))
+        assertFalse(stale.canRemoveSlave(node))
+        assertTrue(stale.slaveRemovalBlockReason(node)!!.contains("清单已过期"))
+
+        assertFalse(ui.copy(slaves = emptyList()).canOpenSlaveRemoval(node))
     }
 
     @Test fun deleteCommandRequiresBoundedIdentityUnicastAndExplicitConfirmation() {

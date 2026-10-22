@@ -344,7 +344,7 @@ internal fun CurrentTaskSection(ui: MasterUiState, alias: (Int) -> String, onQue
     val task = ui.task ?: return
     var details by rememberSaveable(task.client, task.seq) { mutableStateOf(false) }
     val expanded = details || ui.taskNeedsReconciliation || ui.unknownResult
-    val saved = ui.history.firstOrNull { it.task.client == task.client && it.task.seq == task.seq }
+    val saved = ui.savedTaskObservation
     val report = ui.report ?: saved?.report
     PumpCard(if (task.unresolved) "当前任务" else "最近一次任务", header = {
         if (!ui.taskNeedsReconciliation && !ui.unknownResult)
@@ -471,7 +471,10 @@ internal fun SlaveRemovalConfirmation(ui: MasterUiState, address: Long, alias: (
     val target = ui.slaves?.firstOrNull { it.address == address }
     val name = target?.takeIf { it.slot > 0 }?.let { alias(it.slot) } ?: "待配置从机"
     AlertDialog(onDismissRequest = onDismiss, title = { Text("确认删除从机") },
-        text = { Text("删除 $name（${addressLabel(address)}）后，将清除主机保存的该从机连接、登记和调校数据。主机会尝试通知从机退网；若从机离线或无回复，重新添加前需在从机本地清除 Mesh。") },
+        text = { Text(buildString {
+            append("删除 $name（${addressLabel(address)}）后，将清除主机保存的该从机连接、登记和调校数据。主机会尝试通知从机退网；若从机离线或无回复，重新添加前需在从机本地清除 Mesh。")
+            target?.let { ui.slaveRemovalBlockReason(it)?.let { reason -> append("\n\n当前无法删除：$reason") } }
+        }) },
         confirmButton = { TextButton(onClick = { if (target != null && ui.canRemoveSlave(target)) onConfirm(address) },
             enabled = target != null && ui.canRemoveSlave(target)) { Text("确认删除") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
@@ -525,9 +528,12 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
             Supporting("${if (!ui.inventoryFresh) "状态待同步" else if (!node.online) "离线" else "在线"} · ${if (node.commissioned) "已启用" else "待启用配置"}")
                 }
                 if (slot > 0) TextButton(onClick = { onRename(slot) }) { Text("编辑") }
-                TextButton(onClick = { onRemove(node.address) }, enabled = ui.canRemoveSlave(node),
-                    modifier = Modifier.semantics { contentDescription = "删除从机 ${addressLabel(node.address)}" },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("删除") }
+            }
+            OutlinedButton(onClick = { onRemove(node.address) }, enabled = ui.canOpenSlaveRemoval(node),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .semantics { contentDescription = "删除从机 ${addressLabel(node.address)}" },
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                Text("删除从机 · ${addressLabel(node.address)}")
             }
             if (slot in 1..32 && !node.commissioned) {
                 OutlinedButton(onClick = { onCommission(slot) }, enabled = ui.canCommission(node),
@@ -669,7 +675,9 @@ internal fun RecordsScreen(ui: MasterUiState, alias: (Int) -> String, expandedKe
 @Composable
 internal fun SettingsScreen(ui: MasterUiState, seconds: String, onSeconds: (String) -> Unit,
     alias: (Int) -> String = { "${it} 号阀门" }, onSelectCalibration: (Int) -> Unit = {},
-    onReadCalibration: () -> Unit = {}, onSaveCalibration: (String, String, String) -> Unit = { _, _, _ -> }) {
+    onReadCalibration: () -> Unit = {}, onStartFlowCalibration: (Long, Int) -> Unit = { _, _ -> },
+    onMarkFlowCalibration: () -> Unit = {}, onStopFlowCalibration: () -> Unit = {},
+    onQueryFlowCalibration: () -> Unit = {}, onSaveFlowCalibration: () -> Unit = {}) {
     var advanced by rememberSaveable { mutableStateOf(false) }
     var diagnostics by rememberSaveable { mutableStateOf(false) }
     PumpCard("全局任务参数") {
@@ -678,7 +686,8 @@ internal fun SettingsScreen(ui: MasterUiState, seconds: String, onSeconds: (Stri
             isError = seconds.toLongOrNull()?.let { it in 1..240 } != true)
         Supporting("所有阀门、统一设置和单独设置共用此时限，新任务立即生效；正在执行的任务保持原时限。")
     }
-    CalibrationSettings(ui, alias, onSelectCalibration, onReadCalibration, onSaveCalibration)
+    CalibrationSettings(ui, alias, onSelectCalibration, onReadCalibration, onStartFlowCalibration,
+        onMarkFlowCalibration, onStopFlowCalibration, onQueryFlowCalibration, onSaveFlowCalibration)
     TextButton(onClick = { advanced = !advanced }) {
         Text(if (advanced) "收起高级设置" else "高级设置与诊断")
     }

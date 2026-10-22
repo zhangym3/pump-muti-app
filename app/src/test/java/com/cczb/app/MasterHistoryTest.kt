@@ -80,6 +80,22 @@ class MasterHistoryTest {
         assertEquals(6L, history.last().task.seq)
     }
 
+    @Test fun matchingHistoryRequiresMasterAndCompleteTaskRequestIdentity() {
+        val matching = entry.copy(flows = mapOf(2L to MasterMessage.Flow(task.job!!, 2, 503, "DONE", 2940, 8, true, true)),
+            nodes = mapOf(1 to 2L, 32 to 33L))
+        assertEquals(matching, MasterHistory.matchingEntry(listOf(matching), entry.address.lowercase(), task))
+        listOf(
+            matching.copy(address = "AA:BB:CC:DD:EE:02"),
+            matching.copy(task = task.copy(client = "b2")),
+            matching.copy(task = task.copy(seq = task.seq + 1)),
+            matching.copy(task = task.copy(epoch = task.epoch + 1)),
+            matching.copy(task = task.copy(mask = 1)),
+            matching.copy(task = task.copy(ml = task.ml + 50)),
+            matching.copy(task = task.copy(maxMs = task.maxMs + 1000)),
+            matching.copy(task = task.copy(job = MasterJobKey(7, 2)))
+        ).forEach { candidate -> assertNull(MasterHistory.matchingEntry(listOf(candidate), entry.address, task)) }
+    }
+
     @Test fun corruptOrCrossTaskSnapshotsCannotRestoreAsValidResults() {
         listOf("record.0.report" to "R client=a1 seq=41 reply=OK job=7:1 phase=6 mask=80000001 done=0 failed=0 unknown=0",
             "record.0.volume" to "V job=7:1 total_ml=1 measured=2",

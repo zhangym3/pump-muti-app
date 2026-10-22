@@ -76,7 +76,8 @@ class InlinePanelsScreenTest {
                 }
                 pages.SaveableStateProvider(tab) {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
-                        if (tab == 1) CalibrationSettings(state, { "阀门 $it" }, {}, {}, { _, _, _ -> })
+                        if (tab == 1) CalibrationSettings(state, { "阀门 $it" }, {}, {},
+                            { _, _ -> }, {}, {}, {}, {})
                         else Text("控制草稿")
                     }
                 }

@@ -7,14 +7,15 @@ import java.util.Properties
 
 /** Identity and high-water mark must be durably saved before sending any start. */
 data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: Map<String, MasterTask> = emptyMap(),
-                        val pumpTests: Map<String, MasterPumpTest> = emptyMap()) {
+                        val pumpTests: Map<String, MasterPumpTest> = emptyMap(),
+                        val flowCalibrations: Map<String, FlowCalibrationSession> = emptyMap()) {
     fun nextSequence(): Long {
         check(sequence < 0xffff_ffffL) { "控制序号已用尽，请联系现场维护处理客户端身份" }
         return sequence + 1
     }
     fun write(output: OutputStream) {
         val p = Properties()
-        p.setProperty("version", "1")
+        p.setProperty("version", "2")
         p.setProperty("client", client)
         p.setProperty("sequence", sequence.toString())
         tasks.forEach { (address, task) ->
@@ -25,6 +26,7 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
         pumpTests.forEach { (address, test) ->
             p.setProperty("test.$address", listOf(test.seq, test.epoch, test.durationMs, test.outcome.name, if (test.dryRun) 1 else 0).joinToString(","))
         }
+        flowCalibrations.forEach { (address, session) -> p.setProperty("flowcal.$address", session.encode()) }
         p.store(output, "Master control identity - never copy between phones")
     }
     companion object {
@@ -37,7 +39,7 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
         }
         fun read(input: InputStream): MasterLedger {
             val p = Properties().apply { load(input) }
-            require(p.getProperty("version") == "1")
+            val version = p.getProperty("version")?.toIntOrNull().also { require(it in 1..2) }!!
             val client = requireNotNull(MasterProtocol.client(p.getProperty("client")))
             val sequence = p.getProperty("sequence").toLong().also { require(it in 0..0xffff_ffffL) }
             val tasks = p.stringPropertyNames().filter { it.startsWith("task.") }.associate { name ->
@@ -61,7 +63,11 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
                 require(test.seq in 1..sequence && test.epoch in 1..0xffff_ffffL && MasterProtocol.isAllowedCommand(test.command()))
                 address to test
             }
-            return MasterLedger(client, sequence, tasks, tests)
+            val flowCalibrations = if (version >= 2) p.stringPropertyNames().filter { it.startsWith("flowcal.") }.associate { name ->
+                val address = name.removePrefix("flowcal.").also { require(Regex("([0-9A-F]{2}:){5}[0-9A-F]{2}").matches(it)) }
+                address to FlowCalibrationSession.decode(p.getProperty(name), client, sequence)
+            } else emptyMap()
+            return MasterLedger(client, sequence, tasks, tests, flowCalibrations)
         }
     }
 }

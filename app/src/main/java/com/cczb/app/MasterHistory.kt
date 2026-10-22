@@ -21,6 +21,18 @@ data class MasterHistoryEntry(
 object MasterHistory {
     const val LIMIT = 100
 
+    fun matchingEntry(entries: List<MasterHistoryEntry>, address: String?, task: MasterTask): MasterHistoryEntry? {
+        val masterAddress = address?.uppercase() ?: return null
+        if (task.job != null && task.job.epoch != task.epoch) return null
+        return entries.firstOrNull { entry ->
+            entry.address == masterAddress && entry.task.matchesRequest(task)
+        }
+    }
+
+    private fun MasterTask.matchesRequest(other: MasterTask) =
+        client == other.client && seq == other.seq && epoch == other.epoch && mask == other.mask &&
+            ml == other.ml && maxMs == other.maxMs && job == other.job && amounts == other.amounts
+
     fun upsert(entries: List<MasterHistoryEntry>, entry: MasterHistoryEntry): List<MasterHistoryEntry> =
         (entries.filterNot { it.key == entry.key } + entry).sortedByDescending { it.updatedAt }.take(LIMIT)
 
