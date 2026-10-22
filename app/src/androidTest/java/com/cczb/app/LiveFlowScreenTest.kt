@@ -28,12 +28,13 @@ class LiveFlowScreenTest {
         )
         val uiState = mutableStateOf(state)
         compose.setContent { PumpmutiappTheme { Column { LiveFlowPanel(uiState.value) { "阀门 $it" } } } }
-        compose.onNodeWithText("累计 20 mL · 120 脉冲").assertExists()
-        compose.onNodeWithText("当前流速 600 mL/min").assertExists()
+        compose.onNodeWithText("20 mL").assertExists()
+        compose.onNodeWithContentDescription("120 脉冲").assertExists()
+        compose.onNodeWithContentDescription("当前流速 600 mL/min").assertExists()
 
         compose.runOnIdle { uiState.value = state.copy(flowClockAt = 7_001) }
-        compose.onNodeWithText("当前流速 —").assertExists()
-        compose.onNodeWithText("当前流速 600 mL/min").assertDoesNotExist()
+        compose.onNodeWithContentDescription("当前流速 —").assertExists()
+        compose.onNodeWithContentDescription("当前流速 600 mL/min").assertDoesNotExist()
     }
 
     @Test fun finalFlowReplacesLiveSnapshot() {
@@ -48,8 +49,10 @@ class LiveFlowScreenTest {
         )
         compose.setContent { PumpmutiappTheme { Column { LiveFlowPanel(state) { "阀门 $it" } } } }
         compose.onNodeWithText("已完成").assertExists()
-        compose.onNodeWithText("最终出水 500 mL · 2940 脉冲").assertExists()
-        compose.onNodeWithText("当前流速 600 mL/min").assertDoesNotExist()
+        compose.onNodeWithText("500 mL").assertExists()
+        compose.onNodeWithContentDescription("2940 脉冲").assertExists()
+        compose.onNodeWithText("20 mL").assertDoesNotExist()
+        compose.onNodeWithContentDescription("当前流速 600 mL/min").assertDoesNotExist()
     }
 
     @Test fun measuredLeaseFaultIsNotShownAsCompleted() {
@@ -62,7 +65,8 @@ class LiveFlowScreenTest {
         compose.setContent { PumpmutiappTheme { Column { LiveFlowPanel(state) { "阀门 $it" } } } }
         compose.onNodeWithText("异常停止").assertExists()
         compose.onNodeWithText("已完成").assertDoesNotExist()
-        compose.onNodeWithText("最终出水 62 mL · 367 脉冲").assertExists()
+        compose.onNodeWithText("62 mL").assertExists()
+        compose.onNodeWithContentDescription("367 脉冲").assertExists()
     }
 
     @Test fun measuredManualStopIsNotShownAsCompleted() {

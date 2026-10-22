@@ -342,17 +342,18 @@ private fun ReviewLine(label: String, value: String) {
 @Composable
 internal fun CurrentTaskSection(ui: MasterUiState, alias: (Int) -> String, onQuery: () -> Unit, onRetry: () -> Unit) {
     val task = ui.task ?: return
+    if (!task.unresolved && !ui.taskNeedsReconciliation && !ui.unknownResult) return
     var details by rememberSaveable(task.client, task.seq) { mutableStateOf(false) }
     val expanded = details || ui.taskNeedsReconciliation || ui.unknownResult
     val saved = ui.savedTaskObservation
     val report = ui.report ?: saved?.report
-    PumpCard(if (task.unresolved) "当前任务" else "最近一次任务", header = {
+    PumpCard(if (task.unresolved) "当前任务" else "待核实任务", header = {
         if (!ui.taskNeedsReconciliation && !ui.unknownResult)
             TextButton(onClick = { details = !details }) { Text(if (expanded) "收起结果" else "展开结果") }
     }) {
         Text(taskStatus(task, report), style = MaterialTheme.typography.titleMedium)
         Supporting("${java.lang.Long.bitCount(task.mask)} 路 · ${task.amountLabel} · 任务 ${task.job ?: "编号待确认"}")
-        TaskProgressSummary(ui, task)
+        ui.taskProgress()?.let { TaskProgressSummary(it) }
         LiveFlowPanel(ui, alias)
         if (ui.taskNeedsReconciliation) ui.taskReconciliationDetails.forEach { Supporting(it) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -364,105 +365,6 @@ internal fun CurrentTaskSection(ui: MasterUiState, alias: (Int) -> String, onQue
     if (expanded) TaskDetails(task, report, ui.volume ?: saved?.volume, saved?.flows.orEmpty() + ui.flows, alias,
         snapshot = !ui.connected || ui.report == null,
         expectedFlowAddresses = ui.expectedFlowAddresses, nowElapsed = ui.flowClockAt)
-}
-
-@Composable
-private fun TaskProgressSummary(ui: MasterUiState, task: MasterTask) {
-    val nodes = ui.slaves.orEmpty().associateBy { it.slot }
-    val slots = ValveAmounts.slots(task.mask)
-    val readings = slots.mapNotNull { slot ->
-        val address = nodes[slot]?.address ?: return@mapNotNull null
-        val final = ui.flows[address]?.takeIf { it.job == task.job && it.terminal }
-        val live = ui.liveFlows[address]?.takeIf { it.job == task.job }
-        (final?.takeIf { it.measured }?.ml ?: live?.ml)?.let { it }
-    }
-    val current = readings.sum()
-    val ended = slots.count { slot ->
-        val address = nodes[slot]?.address ?: return@count false
-        ui.flows[address]?.let { it.job == task.job && it.terminal } == true
-    }
-    val target = task.totalMl.coerceAtLeast(1L)
-    val percent = (current.toFloat() / target).coerceIn(0f, 1f)
-    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricBlock("目标总量", "${task.totalMl} mL", Modifier.weight(1f))
-                MetricBlock("已上报", if (readings.isEmpty()) "—" else "$current mL", Modifier.weight(1f))
-                MetricBlock("已结束路数", "$ended/${slots.size}", Modifier.weight(1f))
-            }
-            if (readings.isNotEmpty()) {
-                LinearProgressIndicator(progress = { percent }, modifier = Modifier.fillMaxWidth(),
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant)
-            }
-            Supporting("已收到 ${readings.size}/${slots.size} 路计量数据")
-        }
-    }
-}
-
-@Composable
-private fun MetricBlock(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Supporting(label)
-        Text(value, style = MaterialTheme.typography.titleSmall)
-    }
-}
-
-@Composable
-internal fun LiveFlowPanel(ui: MasterUiState, alias: (Int) -> String) {
-    val task = ui.task ?: return
-    (1..32).filter { task.mask and (1L shl (it - 1)) != 0L }.forEach { slot ->
-        val node = ui.slaves.orEmpty().firstOrNull { it.slot == slot }
-        val final = node?.let { ui.flows[it.address] }?.takeIf { it.job == task.job && it.terminal }
-        val sample = node?.let { ui.liveFlows[it.address] }?.takeIf { it.job == task.job && ui.connected }
-        val fresh = sample?.isFresh(ui.flowClockAt) == true
-        val target = task.target(slot).coerceAtLeast(1L)
-        val currentMl = final?.takeIf { it.measured }?.ml ?: sample?.ml
-        val progress = ((currentMl ?: 0L).toFloat() / target).coerceIn(0f, 1f)
-        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceContainerLow) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                        Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
-                            Icon(painterResource(R.drawable.ic_water), contentDescription = null, Modifier.size(21.dp),
-                                tint = MaterialTheme.colorScheme.primary)
-                        }
-                    }
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        Text(alias(slot), style = MaterialTheme.typography.titleSmall)
-                        Supporting("目标 $target mL")
-                    }
-                    StatePill(when {
-                        final?.phase == "FAULT" -> "异常停止"
-                        final?.reason == "MANUAL" -> "已停止"
-                        final?.phase == "DONE" && final.reason == "TARGET" && final.measured -> "已完成"
-                        final != null -> "待核实"
-                        sample != null && fresh -> "抽水中"
-                        sample != null -> "数据过期"
-                        !task.unresolved -> "等待结果"
-                        else -> "等待数据"
-                    }, attention = final != null && (final.phase == "FAULT" || !final.measured))
-                }
-                if (currentMl != null) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(),
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant)
-                when {
-                    final != null -> {
-                        Text(if (final.measured) "最终出水 ${final.ml} mL · ${final.pulses} 脉冲" else "最终计量待核实")
-                        Supporting("已停止 · ${stopReasonLabel(final.reason)}")
-                    }
-                    sample != null -> {
-                        Text("累计 ${sample.ml} mL · ${sample.pulses} 脉冲")
-                        Text(if (fresh) "当前流速 ${sample.rateMlMin} mL/min" else "当前流速 —")
-                        Supporting(if (fresh) "实时更新 · 约每 2 秒" else "数据已过期，等待更新；累计量为上次快照")
-                    }
-                    else -> Supporting(when {
-                        !ui.connected -> "未连接主机，实时数据暂停"
-                        !task.unresolved || ui.stopPending -> "等待最终结果"
-                        else -> "等待实时数据"
-                    })
-                }
-            }
-        }
-    }
 }
 
 @Composable

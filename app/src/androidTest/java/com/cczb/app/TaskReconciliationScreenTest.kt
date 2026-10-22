@@ -41,20 +41,19 @@ class TaskReconciliationScreenTest {
         return { confirmations }
     }
 
-    @Test fun completeRestorationEnablesReviewAndKeepsOriginalMeasurementDetails() {
+    @Test fun completeRestorationEnablesReviewAndHidesTheFinishedTask() {
         val confirmations = show(saved)
         compose.onNodeWithText("检查并启动").performScrollTo().assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, confirmations()) }
-        compose.onNodeWithText("展开结果").performScrollTo().performClick()
-        compose.onNodeWithText("已收到 502 mL").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("最终出水 502 mL · 2957 脉冲").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("地址 0003 · 502 mL · 2957 脉冲 · DONE").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText(stopReasonLabel("TARGET")).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("历史快照", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("最近一次任务").assertDoesNotExist()
+        compose.onNodeWithText("待核实任务").assertDoesNotExist()
+        compose.onNodeWithText("展开结果").assertDoesNotExist()
+        compose.onNodeWithTag("task-total-progress").assertDoesNotExist()
     }
 
     @Test fun missingFlowKeepsReviewDisabledAndExplainsMissingResult() {
         show(saved.copy(flows = emptyMap()))
+        compose.onNodeWithText("待核实任务").assertExists()
         compose.onNodeWithText("检查并启动").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("阀门 1 缺少该任务的终态计量记录（FLOW）。")
             .performScrollTo().assertIsDisplayed()
