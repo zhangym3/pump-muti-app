@@ -2,13 +2,7 @@ package com.cczb.app
 
 /** Progress is session-local monitoring. It never updates the task ledger or final totals. */
 private fun MasterUiState.knownLiveAddresses(): Set<Long>? {
-    val current = task ?: return null
-    val selectedSlots = (1..32).filter { current.mask and (1L shl (it - 1)) != 0L }
-    if (selectedSlots.isEmpty()) return null
-    val bySlot = slaves.orEmpty().filter { it.slot in 1..32 }.associateBy { it.slot }
-    if (selectedSlots.any { bySlot[it] == null }) return null
-    return selectedSlots.mapNotNull { bySlot[it]?.address }.toSet()
-        .takeIf { it.size == selectedSlots.size }
+    return taskNodeBindings?.values?.toSet()
 }
 
 private fun MasterUiState.acceptsLive(job: MasterJobKey, address: Long): Boolean {
@@ -19,7 +13,7 @@ private fun MasterUiState.acceptsLive(job: MasterJobKey, address: Long): Boolean
     if (flows[address]?.let { it.job == job && it.terminal } == true) return false
     val currentReport = report?.takeIf { it.job == job } ?: return true
     if (currentReport.phase >= 6) return false
-    val slot = slaves.orEmpty().firstOrNull { it.address == address }?.slot ?: return false
+    val slot = taskNodeBindings?.entries?.firstOrNull { it.value == address }?.key ?: return false
     val terminal = currentReport.done or currentReport.failed or currentReport.unknown
     return terminal and (1L shl (slot - 1)) == 0L
 }

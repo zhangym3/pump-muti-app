@@ -146,8 +146,8 @@ class IndividualModeScreenTest {
                 { "阀门 $it" }, {}, {}, {}, { _, _ -> }, { reviews++ }, { selectedLevel = it })
         } } }
 
-        compose.onNodeWithText("低档 50%").performScrollTo().assertIsEnabled().performClick()
-        compose.onNodeWithText("中档 75%").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("低档 65%").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("中档 80%").performScrollTo().assertIsEnabled().performClick()
         compose.onNodeWithText("高档 100%").performScrollTo().assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(3, selectedLevel); assertEquals(0, reviews) }
         compose.onNodeWithText("检查并启动").performScrollTo().assertIsEnabled()

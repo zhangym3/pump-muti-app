@@ -18,6 +18,8 @@ data class MasterUiState(
     val masterAddress: String? = null,
     val retryDevice: MasterDevice? = null,
     val hello: MasterMessage.Hello? = null, val task: MasterTask? = null,
+    val caps: MasterMessage.Caps? = null, val maintenance: MasterMessage.Maintenance? = null,
+    val meshBudget: MasterMessage.MeshBudget? = null,
     val report: MasterMessage.Report? = null, val volume: MasterMessage.Volume? = null,
     val flows: Map<Long, MasterMessage.Flow> = emptyMap(), val flowClockAt: Long = 0,
     val taskAddresses: Map<Int, Long> = emptyMap(),
@@ -86,6 +88,15 @@ data class MasterUiState(
     val canStopFlowCalibration get() = connected && hello?.role == "PUMP_MASTER" && flowCalibration?.canStop == true
     val canQueryFlowCalibration get() = connected && hello?.role == "PUMP_MASTER" && flowCalibration != null
     val managementBusy get() = meshPending || mesh?.busy == true
+    val meshBudgetMessage: String? get() {
+        val budget = meshBudget ?: return null
+        if (!connected || !meshFresh || budget.epoch != hello?.epoch || budget.operation != mesh?.operation) return null
+        if (budget.recovery == "RESTART_REQUIRED")
+            return "本次连接配置已隔离，请重启主机后重新连接并刷新清单；重复点击重试无法恢复。"
+        return if (mesh?.busy == true && budget.remainingMs > 0)
+            "最近一次主机状态：本次连接配置剩余上限约 ${(budget.remainingMs + 999) / 1000} 秒。可刷新核实进度。"
+        else null
+    }
     val selectableMask get() = if (!inventoryFresh) 0L else slaves.orEmpty().filter { it.selectable }
         .fold(0L) { mask, node -> mask or (1L shl (node.slot - 1)) }
     val canViewMesh get() = connected && statusFresh && hello?.role == "PUMP_MASTER" && meshFresh
@@ -137,7 +148,7 @@ data class MasterUiState(
         meshFresh && mesh?.capable == true && !managementBusy &&
         !flowCalibrationLocked && !unknownResult && localFresh && local?.pumpCommand == false
     val canScanMesh get() = canMeshProvision && mesh?.phase in setOf("IDLE", "SCAN_DONE", "READY", "REMOVE_DONE", "FAILED")
-    val canJoinMesh get() = canMeshProvision && mesh?.phase == "SCAN_DONE" && candidates.isNotEmpty()
+    val canJoinMesh get() = canMeshProvision && inventoryFresh && slaves.orEmpty().size < (caps?.maxNodes ?: 5) && mesh?.phase == "SCAN_DONE" && candidates.isNotEmpty()
     fun canCommission(node: MasterSlave) = connected && statusFresh && hello?.role == "PUMP_MASTER" &&
         inventoryFresh && node.slot in 1..32 && node.online && !node.commissioned &&
         meshFresh && mesh?.capable == true && !managementBusy && storageHealthy && historyHealthy &&
@@ -167,7 +178,7 @@ data class MasterUiState(
         val currentReport = report?.takeIf { it.matches(currentTask) }
         (currentReport?.unknown ?: savedTaskObservation?.report?.takeIf { it.matches(currentTask) }?.unknown ?: 0L) != 0L
     } ?: false
-    private val taskNodeBindings: Map<Int, Long>? get() {
+    internal val taskNodeBindings: Map<Int, Long>? get() {
         val currentTask = task ?: return null
         val selectedSlots = (1..32).filter { currentTask.mask and (1L shl (it - 1)) != 0L }.toSet()
         if (taskAddresses.keys != selectedSlots || taskAddresses.values.any { it !in 1..0x7fff } ||
@@ -255,6 +266,9 @@ data class MasterUiState(
         else -> "水泵输出已关闭"
     }
     val startBlockReason: String? get() = when {
+        maintenance?.let { it.locked || it.pending != 0 } == true -> "维护许可或关闭核对尚未结束，请完成现场维护退出"
+        caps?.basic == true && maintenance == null -> "正在核实维护互锁状态"
+        slaves.orEmpty().size > (caps?.maxNodes ?: 5) -> "登记节点超过五台，请先核实并移除多余节点"
         flowCalibrationLocked -> "计量校准正在执行或待确认，请先停止并完成对账"
         calibration.pending != null -> "计量调校待主机确认，请稍候"
         !connected -> "请先连接主机"
@@ -289,6 +303,8 @@ data class MasterUiState(
     }
     val canStartDryTest get() = dryTestBlockReason == null
     val testBlockReason: String? get() = when {
+        caps?.basic == true -> "基础版本仅提供多路定量；保留原测试的停止与查询"
+        maintenance?.locked == true -> "维护许可未退出，禁止启动水泵"
         flowCalibrationLocked -> "计量校准正在执行或待确认，请先停止并完成对账"
         calibration.pending != null -> "计量调校待主机确认，请稍候"
         !connected -> "请先连接 PUMP_MASTER 主机，并完成系统 PIN 配对"
@@ -312,15 +328,17 @@ data class MasterUiState(
         else -> null
     }
     val canStartTest get() = testBlockReason == null
-    val canSetSpeed get() = connected && statusFresh && !managementBusy && hello?.role == "PUMP_MASTER" &&
+    val canSetSpeed get() = maintenance?.locked != true && connected && statusFresh && !managementBusy && hello?.role == "PUMP_MASTER" &&
         hello.commissioned && localFresh && (local?.fault == "NONE" || local?.fault == "BOOT_LOCK" && manualTestSupported) && pwmFresh &&
         pwm.snapshot?.epoch == hello.epoch && pwm.snapshot.revision < 0xffff_ffffL &&
         pwm.pending == null && calibration.pending == null && !flowCalibrationLocked && storageHealthy && historyHealthy && !unknownResult && !taskNeedsReconciliation &&
         (local?.pumpCommand == false || local?.testActive == true) && pwm.snapshot?.dryActive != true &&
         !(pumpTest?.unresolved == true && pumpTest.dryRun)
     val canStopTest get() = connected && hello?.role == "PUMP_MASTER" && pumpTest?.unresolved == true
-    val canStop get() = connected && hello?.role == "PUMP_MASTER" && task?.unresolved == true && task.job != null
-    val canRetry get() = connected && statusFresh && !managementBusy && !flowCalibrationLocked && hello?.ready == true && storageHealthy && task?.outcome == MasterOutcome.PENDING && task.epoch == hello.epoch
+    val canStop get() = connected && hello?.role == "PUMP_MASTER" && task?.unresolved == true
+    val canRetry get() = connected && statusFresh && !managementBusy && !flowCalibrationLocked && hello?.ready == true && storageHealthy && task?.outcome == MasterOutcome.PENDING && !task.stopRequested && task.epoch == hello.epoch
+    val maxConcurrent get() = caps?.takeIf { it.epoch == hello?.epoch }?.maxConcurrent ?: 1
+    fun canStartMask(mask: Long) = mask in 1..0xffff_ffffL && java.lang.Long.bitCount(mask) in 1..maxConcurrent
 
     fun restoreTaskObservation(): MasterUiState {
         val entry = savedTaskObservation
@@ -346,6 +364,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     private var address: String? = null
     private var directStartReply = false
     private var stopSequence: Long? = null
+    private var stopSentAt: Long = 0
     private var lastControlAt = -10_000L
     private var lastHelloAt = 0L
     private var lastLocalAt = 0L
@@ -460,7 +479,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     private fun persistTask(task: MasterTask): Boolean = runCatching {
         val current = checkNotNull(ledger)
         val device = checkNotNull(address)
-        save(current.copy(sequence = maxOf(current.sequence, task.seq), tasks = current.tasks + (device to task)))
+        save(current.copy(sequence = maxOf(current.sequence, task.seq, task.stopSequence ?: 0), tasks = current.tasks + (device to task)))
     }.onFailure(::storageError).isSuccess
     private fun persistTest(test: MasterPumpTest): Boolean = runCatching {
         val current = checkNotNull(ledger)
@@ -514,8 +533,10 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         meshSentAt = 0L
         meshReceivedAt = 0L
         val savedTask = ledger?.tasks?.get(address)
+        stopSequence = savedTask?.stopSequence
+        stopSentAt = 0
         val savedFlowCalibration = ledger?.flowCalibrations?.get(address)
-        val restoredState = state.value.copy(connection = MasterConnectionState.Connecting, hello = null, statusFresh = false, statusAt = null, report = null, volume = null, flows = emptyMap(), liveFlows = emptyMap(), local = null, localFresh = false, localAt = null, stopPending = false,
+        val restoredState = state.value.copy(connection = MasterConnectionState.Connecting, hello = null, caps = null, maintenance = null, meshBudget = null, statusFresh = false, statusAt = null, report = null, volume = null, flows = emptyMap(), liveFlows = emptyMap(), local = null, localFresh = false, localAt = null, stopPending = savedTask?.let { it.stopRequested && it.unresolved } == true,
             slaves = null, inventoryFresh = false, inventoryLoading = false, mesh = null, meshFresh = false, meshPending = false, candidates = emptyList(),
             pwm = MasterPumpPwm(), pwmFresh = false,
             calibration = MasterCalibration(slot = savedFlowCalibration?.slot ?: 0, address = savedFlowCalibration?.address ?: 0),
@@ -534,6 +555,8 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     }
     fun start(mask: Long, ml: Long, seconds: Long, amounts: String = "") {
         if (!state.value.canStart) return
+        if (!state.value.canStartMask(mask)) { message("当前主机最多支持 ${state.value.maxConcurrent} 路同时出水，请调整选择或更新固件"); return }
+        if (state.value.caps?.basic == true && amounts.isNotEmpty()) { message("基础版本统一设置每路目标量"); return }
         if (mask !in 1..0xffff_ffffL || mask and state.value.selectableMask.inv() != 0L || (if (amounts.isEmpty()) !VolumeRules.isValid(ml) else ml != 0L || !ValveAmounts.isValid(mask, amounts)) || seconds !in 1..240) {
             message("请选择节点，水量 50–2000 mL 且为 50 的整数倍，时限 1–240 秒")
             return
@@ -794,20 +817,25 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
         val current = state.value
         if (!current.canStop) { query(); return }
         val task = current.task ?: return
-        val job = task.job ?: return
-        val hello = current.hello ?: return
-        // Stops use a known task key. Never guess a task number after reconnect.
-        val seq = runCatching {
-            stopSequence ?: checkNotNull(ledger).let { old -> old.nextSequence().also { save(old.copy(sequence = it)) } }
-        }.getOrElse {
-            // An already accepted job can still be stopped with its original nonzero sequence.
-            storageError(it)
-            task.seq
-        }
-        stopSequence = seq
-        state.value = state.value.copy(stopPending = true)
-        message("已请求停止，等待 Master 回复和阀门结算")
-        manager.sendCommand("stop ${task.client} $seq ${hello.epoch} ${job.epoch} ${job.id}")
+        val next = runCatching { task.copy(stopRequested = true,
+            stopSequence = task.stopSequence ?: checkNotNull(ledger).nextSequence()) }
+            .onFailure(::storageError).getOrNull() ?: task.copy(stopRequested = true)
+        val saved = persistTask(next)
+        state.value = state.value.copy(task = next, stopPending = true)
+        if (saved) message(if (next.job == null) "已保存停止意图；查询原任务后停止，不会重发启动" else "已请求停止，等待 Master 回复和阀门结算")
+        sendStopIntent()
+        if (next.job == null) query()
+    }
+    private fun sendStopIntent() {
+        val current = state.value
+        val task = current.task?.takeIf { it.stopRequested && it.unresolved } ?: return
+        val hello = current.hello?.takeIf { current.connected && it.role == "PUMP_MASTER" } ?: return
+        val command = task.stopCommand(hello.epoch) ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (stopSentAt != 0L && now - stopSentAt < 1_000) return
+        val seq = task.stopSequence ?: task.seq // An emergency stop remains possible after local write failure.
+        stopSequence = seq; stopSentAt = now
+        manager.sendCommand(command)
     }
     private fun message(text: String) { state.value = state.value.copy(message = text) }
     override fun onConnectionStateChanged(state: MasterConnectionState) {
@@ -819,6 +847,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
             resetMeshState()
             val selected = this.state.value.flowCalibration
             this.state.value = this.state.value.copy(pwm = MasterPumpPwm(), pwmFresh = false,
+                caps = null, maintenance = null, meshBudget = null,
                 calibration = MasterCalibration(slot = selected?.slot ?: this.state.value.calibration.slot,
                     address = selected?.address ?: this.state.value.calibration.address), liveFlows = emptyMap())
             directStartReply = false
@@ -943,6 +972,12 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
                 })
                 if (success) manager.requestState()
             }
+            is MasterMessage.Caps -> if (parsed.epoch == state.value.hello?.epoch) state.value = state.value.copy(caps = parsed)
+            is MasterMessage.Maintenance -> if (state.value.caps?.maintenance == true) state.value = state.value.copy(maintenance = parsed)
+            is MasterMessage.MeshBudget -> if (parsed.epoch == state.value.hello?.epoch) {
+                state.value = state.value.copy(meshBudget = parsed)
+                if (parsed.recovery == "RESTART_REQUIRED") message("组网资源状态不可信，需要受控重启主机；重连后先核实原任务")
+            }
             is MasterMessage.Hello -> {
                 val first = state.value.hello == null
                 val existingFlow = state.value.flowCalibration
@@ -952,6 +987,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
                     resetMeshState()
                     val selected = state.value.flowCalibration
                     state.value = state.value.copy(pwm = MasterPumpPwm(), pwmFresh = false, localFresh = false,
+                        caps = null, maintenance = null, meshBudget = null,
                         calibration = MasterCalibration(slot = selected?.slot ?: state.value.calibration.slot,
                             address = selected?.address ?: state.value.calibration.address), liveFlows = emptyMap())
                 }
@@ -1084,6 +1120,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
                 directStartReply = false
                 state.value = (if (saved) updated else updated.copy(storageHealthy = false, message = state.value.message)).pruneLiveFlows()
                 if (parsed.reply == "OK" || next != previous) recordObservation()
+                sendStopIntent()
             }
             is MasterMessage.Volume -> if (parsed.job == state.value.task?.job) {
                 val task = state.value.task ?: return

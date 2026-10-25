@@ -64,7 +64,7 @@ internal fun CalibrationSettings(
 
         Text("校准档位", style = MaterialTheme.typography.titleSmall)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("低 50%", "中 75%", "高 100%").forEachIndexed { index, label ->
+            listOf("低 65%", "中 80%", "高 100%").forEachIndexed { index, label ->
                 FilterChip(selected = speed == index + 1, onClick = { speed = index + 1 },
                     enabled = !locked, label = { Text(label) })
             }

@@ -17,3 +17,6 @@
 .cxx
 local.properties
 /implementation-tests.log
+/basic-five-tests.log
+/v4-tests.log
+/v4-apk.log

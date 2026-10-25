@@ -30,8 +30,8 @@ class MasterUiStateTest {
         }
     }
 
-    @Test fun stopRequiresAKnownUnfinishedJobButRemainsAvailableWithStaleStatusOrStorageFailure() {
-        assertFalse(ready.copy(task = task).canStop)
+    @Test fun stopIntentCanBeRecordedBeforeAcceptanceAndSurvivesStaleStatusOrStorageFailure() {
+        assertTrue(ready.copy(task = task).canStop)
         val accepted = task.copy(outcome = MasterOutcome.ACCEPTED, job = MasterJobKey(7, 1))
         assertTrue(ready.copy(task = accepted, statusFresh = false, storageHealthy = false).canStop)
         assertFalse(ready.copy(task = accepted.copy(outcome = MasterOutcome.FINISHED)).canStop)
@@ -41,6 +41,7 @@ class MasterUiStateTest {
     @Test fun originalRetryRequiresFreshReadyMasterAndUnchangedBootEpoch() {
         val pending = ready.copy(task = task)
         assertTrue(pending.canRetry)
+        assertFalse(pending.copy(task = task.copy(stopRequested = true)).canRetry)
         assertFalse(pending.copy(statusFresh = false).canRetry)
         assertFalse(pending.copy(hello = hello.copy(epoch = 8)).canRetry)
         assertFalse(pending.copy(task = task.copy(outcome = MasterOutcome.REJECTED)).canRetry)

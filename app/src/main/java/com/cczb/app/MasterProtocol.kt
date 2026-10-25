@@ -48,6 +48,12 @@ fun commissionReplyLabel(reply: String): String = when (reply) {
 }
 
 sealed interface MasterMessage {
+    data class Caps(val epoch: Long, val maxNodes: Int, val maxConcurrent: Int,
+                    val basic: Boolean, val maintenance: Boolean) : MasterMessage
+    data class Maintenance(val locked: Boolean, val address: Long, val token: MasterJobKey?,
+                           val boot: Long, val pending: Int) : MasterMessage
+    data class MeshBudget(val epoch: Long, val operation: Long, val remainingMs: Long,
+                          val recovery: String) : MasterMessage
     data class Calibration(val epoch: Long, val request: Long, val slot: Int, val address: Long,
                            val revision: Long, val low: Long, val medium: Long, val high: Long,
                            val reply: String, val baseK: Long, val baseVersion: Long) : MasterMessage {
@@ -136,7 +142,7 @@ enum class MasterOutcome { PENDING, ACCEPTED, REJECTED, FINISHED }
 data class MasterTask(
     val client: String, val seq: Long, val epoch: Long, val mask: Long, val ml: Long, val maxMs: Long,
     val outcome: MasterOutcome = MasterOutcome.PENDING, val job: MasterJobKey? = null,
-    val amounts: String = ""
+    val amounts: String = "", val stopRequested: Boolean = false, val stopSequence: Long? = null
 ) {
     val unresolved get() = outcome == MasterOutcome.PENDING || outcome == MasterOutcome.ACCEPTED
     val individual get() = amounts.isNotEmpty()
@@ -146,6 +152,11 @@ data class MasterTask(
     fun command() = if (individual) "start-each $client $seq $epoch ${mask.toString(16).padStart(8, '0')} $maxMs $amounts"
         else "start $client $seq $epoch ${mask.toString(16).padStart(8, '0')} $ml $maxMs"
     fun query() = "query $client $seq"
+    fun stopCommand(currentEpoch: Long): String? {
+        val key = job ?: return null
+        if (!stopRequested || !unresolved || currentEpoch !in 1..0xffff_ffffL) return null
+        return "stop $client ${stopSequence ?: seq} $currentEpoch ${key.epoch} ${key.id}"
+    }
 
     /** A transport write is never acceptance. Unknown query results stay unresolved. */
     fun reconcile(report: MasterMessage.Report, directStartReply: Boolean): MasterTask {
@@ -193,6 +204,27 @@ object MasterProtocol {
         fun flag(name: String) = n(name)?.takeIf { it <= 1 }
         fun reason() = fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: if ("reason" in fields) null else "UNKNOWN"
         return when (parts.firstOrNull()) {
+            "CAPS" -> {
+                val epoch = n("epoch")?.takeIf { it > 0 } ?: return null
+                val nodes = n("max_nodes")?.takeIf { it in 1..5 } ?: return null
+                val concurrent = n("max_concurrent")?.takeIf { it in 1..nodes } ?: return null
+                MasterMessage.Caps(epoch, nodes.toInt(), concurrent.toInt(),
+                    (flag("basic") ?: return null) == 1L, (flag("maintenance") ?: return null) == 1L)
+            }
+            "MAINT" -> {
+                val locked = (flag("locked") ?: return null) == 1L
+                val address = h("addr")?.takeIf { it in 0..0x7fff } ?: return null
+                val tokenText = fields["token"] ?: return null
+                val token = if (tokenText == "0:0") null else key(tokenText) ?: return null
+                val boot = n("boot") ?: return null
+                if (locked && (address == 0L || token == null || boot == 0L)) return null
+                MasterMessage.Maintenance(locked, address, token, boot,
+                    n("pending")?.takeIf { it in 0..3 }?.toInt() ?: return null)
+            }
+            "MESH_BUDGET" -> MasterMessage.MeshBudget(
+                n("epoch")?.takeIf { it > 0 } ?: return null, n("op") ?: return null,
+                n("remaining_ms")?.takeIf { it <= 420_000 } ?: return null,
+                fields["recovery"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: return null)
             "FC" -> {
                 val sessionClient = client(fields["c"] ?: return null) ?: return null
                 val jobText = fields["j"] ?: return null
@@ -244,15 +276,23 @@ object MasterProtocol {
                 MasterSlave(n("slot")?.takeIf { it <= 32 }?.toInt() ?: return null,
                     h("addr")?.takeIf { it in 1..0x7fff } ?: return null,
                     (flag("online") ?: return null) == 1L, (flag("commissioned") ?: return null) == 1L))
-            "MESH" -> MasterMessage.Mesh(n("epoch")?.takeIf { it > 0 } ?: return null,
-                n("req")?.takeIf { it > 0 } ?: return null,
-                MasterMeshState(fields["phase"]?.takeIf { it.matches(Regex("[A-Z_]{1,24}")) } ?: return null,
-                    (flag("busy") ?: return null) == 1L, (flag("capable") ?: return null) == 1L,
-                    fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: return null,
-                    n("op") ?: return null, n("scan") ?: return null,
-                    n("found")?.takeIf { it <= 8 }?.toInt() ?: return null,
-                    h("target")?.takeIf { it <= 0x7fff } ?: return null,
-                    fields["remove"]?.let { (flag("remove") ?: return null) == 1L } ?: false))
+            "MESH" -> {
+                val configStep = if ("step" in fields) n("step")?.takeIf { it <= 5 }?.toInt() ?: return null else 0
+                val configAttempt = if ("attempt" in fields) n("attempt")?.takeIf { it <= 3 }?.toInt() ?: return null else 0
+                val retryMs = fields["retry_ms"]?.let { n("retry_ms")?.takeIf { ms -> ms <= 12000 }?.toInt() ?: return null } ?: 0
+                MasterMessage.Mesh(n("epoch")?.takeIf { it > 0 } ?: return null,
+                    n("req")?.takeIf { it > 0 } ?: return null,
+                    MasterMeshState(fields["phase"]?.takeIf { it.matches(Regex("[A-Z_]{1,24}")) } ?: return null,
+                        (flag("busy") ?: return null) == 1L, (flag("capable") ?: return null) == 1L,
+                        fields["reason"]?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: return null,
+                        n("op") ?: return null, n("scan") ?: return null,
+                        n("found")?.takeIf { it <= 8 }?.toInt() ?: return null,
+                        h("target")?.takeIf { it <= 0x7fff } ?: return null,
+                        fields["remove"]?.let { (flag("remove") ?: return null) == 1L } ?: false,
+                        configStep, configAttempt,
+                        fields["retry_wait"]?.let { (flag("retry_wait") ?: return null) == 1L } ?: false,
+                        retryMs))
+            }
             "REMOVE" -> MasterMessage.Removal(n("epoch")?.takeIf { it > 0 } ?: return null,
                 n("req")?.takeIf { it > 0 } ?: return null,
                 h("addr")?.takeIf { it in 1..0x7fff } ?: return null,

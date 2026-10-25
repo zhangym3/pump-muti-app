@@ -42,7 +42,9 @@ class MasterInventoryCollector(val epoch: Long, val request: Long) {
 data class MasterMeshState(
     val phase: String, val busy: Boolean, val capable: Boolean, val reason: String,
     val operation: Long, val scan: Long, val found: Int, val target: Long,
-    val supportsRemoval: Boolean = false
+    val supportsRemoval: Boolean = false, val configStep: Int = 0,
+    val configAttempt: Int = 0, val configRetryWait: Boolean = false,
+    val configRetryRemainingMs: Int = 0
 ) {
     val label get() = when (phase) {
         "STARTING" -> "正在初始化组网"
@@ -50,7 +52,22 @@ data class MasterMeshState(
         "SCANNING" -> "正在扫描附近从机…"
         "SCAN_DONE" -> "扫描完成，发现 $found 台从机"
         "JOINING" -> "正在连接并配对从机…"
-        "CONFIGURING" -> "正在绑定密钥和配置 Mesh…"
+        "CONFIGURING" -> {
+            val step = when (configStep) {
+                0 -> "正在绑定密钥和配置 Mesh"
+                1 -> "读取从机能力"
+                2 -> "绑定 AppKey"
+                3 -> "绑定控制模型"
+                4 -> "配置订阅地址"
+                else -> "配置 Mesh"
+            }
+            val attempt = if (configAttempt in 1..3) "（第 $configAttempt/3 次）" else ""
+            if (configRetryWait) {
+                val wait = if (configRetryRemainingMs > 0) "（约 ${(configRetryRemainingMs + 999) / 1000} 秒）" else ""
+                "$step 未收到回复，等待分段清理后重试$attempt$wait…"
+            }
+            else "$step$attempt…"
+        }
         "WAIT_HELLO" -> "正在等待从机握手…"
         "READY" -> "从机组网成功"
         "CANCELLING" -> "正在结束超时的配对…"

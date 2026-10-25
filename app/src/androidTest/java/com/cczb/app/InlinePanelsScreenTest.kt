@@ -83,12 +83,12 @@ class InlinePanelsScreenTest {
                 }
             }
         } }
-        compose.onNodeWithText("低档 50% · 脉冲/mL").performScrollTo().performTextReplacement("6.123")
+        compose.onNodeWithText("低档 65% · 脉冲/mL").performScrollTo().performTextReplacement("6.123")
         compose.onNodeWithText("测试总脉冲数").performScrollTo().performTextReplacement("3000")
         compose.onNodeWithText("控制页").performClick()
         restoration.emulateSavedInstanceStateRestore()
         compose.onNodeWithText("调校页").performClick()
-        compose.onNodeWithText("低档 50% · 脉冲/mL").performScrollTo().assertTextContains("6.123")
+        compose.onNodeWithText("低档 65% · 脉冲/mL").performScrollTo().assertTextContains("6.123")
         compose.onNodeWithText("测试总脉冲数").performScrollTo().assertTextContains("3000")
     }
 }

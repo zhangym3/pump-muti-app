@@ -15,13 +15,14 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
     }
     fun write(output: OutputStream) {
         val p = Properties()
-        p.setProperty("version", "2")
+        p.setProperty("version", "3")
         p.setProperty("client", client)
         p.setProperty("sequence", sequence.toString())
         tasks.forEach { (address, task) ->
             p.setProperty("task.$address", listOf(task.seq, task.epoch, task.mask, task.ml, task.maxMs,
                 task.outcome.name, task.job?.epoch ?: 0, task.job?.id ?: 0).joinToString(","))
             if (task.individual) p.setProperty("amounts.$address", task.amounts)
+            if (task.stopRequested) p.setProperty("stop.$address", (task.stopSequence ?: 0).toString())
         }
         pumpTests.forEach { (address, test) ->
             p.setProperty("test.$address", listOf(test.seq, test.epoch, test.durationMs, test.outcome.name, if (test.dryRun) 1 else 0).joinToString(","))
@@ -39,17 +40,19 @@ data class MasterLedger(val client: String, val sequence: Long = 0, val tasks: M
         }
         fun read(input: InputStream): MasterLedger {
             val p = Properties().apply { load(input) }
-            val version = p.getProperty("version")?.toIntOrNull().also { require(it in 1..2) }!!
+            val version = p.getProperty("version")?.toIntOrNull().also { require(it in 1..3) }!!
             val client = requireNotNull(MasterProtocol.client(p.getProperty("client")))
             val sequence = p.getProperty("sequence").toLong().also { require(it in 0..0xffff_ffffL) }
             val tasks = p.stringPropertyNames().filter { it.startsWith("task.") }.associate { name ->
                 val address = name.removePrefix("task.").also { require(Regex("([0-9A-F]{2}:){5}[0-9A-F]{2}").matches(it)) }
                 val f = p.getProperty(name).split(',').also { require(it.size == 8) }
+                val stop = if (version >= 3) p.getProperty("stop.$address")?.toLong()?.also { require(it in 0..sequence) } else null
                 val task = MasterTask(client, f[0].toLong(), f[1].toLong(), f[2].toLong(), f[3].toLong(), f[4].toLong(),
                     MasterOutcome.valueOf(f[5]), if (f[6] == "0" && f[7] == "0") null else MasterJobKey(f[6].toLong(), f[7].toLong()),
-                    p.getProperty("amounts.$address", ""))
+                    p.getProperty("amounts.$address", ""), stopRequested = stop != null, stopSequence = stop?.takeIf { it > 0 })
                 require(!task.individual || task.ml == 0L)
                 require(task.seq in 1..sequence && task.epoch in 1..0xffff_ffffL && task.mask in 1..0xffff_ffffL)
+                require(stop == null || stop == 0L || stop > task.seq)
                 require(MasterProtocol.isAllowedCommand(task.command()))
                 task.job?.let { require(it.epoch == task.epoch && it.id in 1..0xffff_ffffL) }
                 require(task.outcome != MasterOutcome.ACCEPTED && task.outcome != MasterOutcome.FINISHED || task.job != null)

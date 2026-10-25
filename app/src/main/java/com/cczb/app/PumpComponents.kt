@@ -152,7 +152,7 @@ internal fun TaskStatusHero(task: MasterTask, report: MasterMessage.Report?) {
             finished -> taskStatus(task, report)
             else -> taskStatus(task, report)
         }, style = MaterialTheme.typography.titleLarge)
-        Supporting("$count 路 · ${task.amountLabel} · 按编号顺序执行")
+        Supporting("$count 路 · ${task.amountLabel} · 各路独立计量")
     }
 }
 
@@ -173,7 +173,7 @@ internal fun TaskDetails(
     PumpCard(if (snapshot) "已保存的任务结果" else "本次任务") {
         Supporting("任务 ${task.job ?: "编号待确认"}")
         Text(taskStatus(task, report), style = MaterialTheme.typography.headlineSmall)
-        Supporting("$count 路 · ${task.amountLabel} · 按编号顺序执行")
+        Supporting("$count 路 · ${task.amountLabel} · 各路独立计量")
         val total = task.totalMl
         val validVolume = volume.takeIf { MasterResultMerge.hasVolumeData(it, task.job, task.mask) }
         if (validVolume != null) {

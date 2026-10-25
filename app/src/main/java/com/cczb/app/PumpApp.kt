@@ -59,8 +59,9 @@ internal fun PumpApp(model: MasterControlViewModel) {
     val unresolved = task?.unresolved == true
     val ml = amount.toLongOrNull()
     val maxSeconds = seconds.toLongOrNull()
+    LaunchedEffect(ui.caps?.basic) { if (ui.caps?.basic == true) individual = false }
     val encodedAmounts = if (individual) ValveAmounts.encode(mask, valveAmounts) else null
-    val valid = mask in 1..0xffff_ffffL && mask and ui.selectableMask.inv() == 0L &&
+    val valid = ui.canStartMask(mask) && mask in 1..0xffff_ffffL && mask and ui.selectableMask.inv() == 0L &&
         (if (individual) encodedAmounts != null && ui.hello?.individual == true else ml != null && VolumeRules.isValid(ml)) &&
         maxSeconds != null && maxSeconds in 1..240
     val openPump = {
@@ -236,7 +237,10 @@ internal fun PumpApp(model: MasterControlViewModel) {
                         onCommission = { commissionSlot = it }, onCloseAdd = { showAddDevice = false },
                         onRemove = { removeAddress = it },
                         pumpExpanded = navigation.pumpExpanded, pumpContent = {
-                            PumpTestScreen(ui, duration, { duration = it }, model::refresh,
+                            if (ui.caps?.basic == true && !ui.pumpTestUnresolved) {
+                                Supporting("基础版本：最多 ${ui.maxConcurrent} 路同时定量。维护按钮须由现场取得许可。")
+                                ui.maintenance?.takeIf { it.locked }?.let { Supporting("维护许可未退出，自动运行已锁定。") }
+                            } else PumpTestScreen(ui, duration, { duration = it }, model::refresh,
                                 { if (ui.canStartTest) model.startTest(duration) }, model::stopTest, model::setSpeed, model::resetBootLock)
                         })
                     PumpTab.RECORDS -> RecordsScreen(ui, alias, navigation.recordKey,

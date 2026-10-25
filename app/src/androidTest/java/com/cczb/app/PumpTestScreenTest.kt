@@ -63,7 +63,7 @@ class PumpTestScreenTest {
                 PumpTestScreen(pwm, 3, {}, {}, { starts++ }, {}, { level = it })
             } }
         }
-        compose.onNodeWithText("中档 75%").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("中档 80%").performScrollTo().assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(2, level); assertEquals(0, starts) }
         compose.onNodeWithText("高档 100%").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(3, level); assertEquals(0, starts) }
@@ -78,7 +78,7 @@ class PumpTestScreenTest {
                 PumpTestScreen(pending, 3, {}, {}, {}, { stops++ })
             } }
         }
-        compose.onNodeWithText("中档 75%").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("中档 80%").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("启动测试").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("停止测试").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, stops) }

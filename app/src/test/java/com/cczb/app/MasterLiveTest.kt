@@ -11,6 +11,7 @@ class MasterLiveTest {
         connection = MasterConnectionState.Connected,
         hello = MasterMessage.Hello("PUMP_MASTER", 1, 1, 7, true, true, "NONE"),
         task = baseTask,
+        taskAddresses = mapOf(1 to 2L),
         inventoryFresh = true,
         slaves = listOf(MasterSlave(1, 2, true, true))
     )
@@ -57,13 +58,13 @@ class MasterLiveTest {
             base.copy(hello = base.hello!!.copy(epoch = 8)),
             base.copy(task = baseTask.copy(outcome = MasterOutcome.FINISHED)),
             base.copy(task = baseTask.copy(job = MasterJobKey(7, 2))),
-            base.copy(slaves = listOf(MasterSlave(1, 3, true, true))),
-            base.copy(inventoryFresh = false, slaves = null),
+            base.copy(taskAddresses = emptyMap()),
+            base.copy(taskAddresses = mapOf(2 to 2L)),
             base.copy(flows = mapOf(2L to MasterMessage.Flow(job, 2, 20, "DONE", terminal = true)))
         ).forEach { state -> assertSame(state, state.receiveLive(live(), 1_000)) }
 
         val staleInventory = base.copy(inventoryFresh = false)
-        assertNull(staleInventory.expectedFlowAddresses)
+        assertEquals(setOf(2L), staleInventory.expectedFlowAddresses)
         assertEquals(20, staleInventory.receiveLive(live(), 1_000).liveFlows.getValue(2).ml)
 
         val nodeDone = MasterMessage.Report("a1", 1, "OK", job, 3, 1, 1, 0, 0)
@@ -78,5 +79,12 @@ class MasterLiveTest {
         assertTrue(sample.isFresh(7_000))
         assertFalse(sample.isFresh(7_001))
         assertFalse(sample.isFresh(999))
+    }
+    @Test fun inventoryReplacementCannotMoveAnActiveTasksLiveAddress() {
+        val replaced = base.copy(inventoryFresh = true, slaves = listOf(MasterSlave(1, 3, true, true)))
+        assertEquals(20, replaced.receiveLive(live(), 1_000).liveFlows.getValue(2).ml)
+        assertSame(replaced, replaced.receiveLive(live(address = 3), 1_000))
+        val offlineInventory = base.copy(slaves = null, inventoryFresh = false)
+        assertEquals(setOf(2L), offlineInventory.expectedFlowAddresses)
     }
 }

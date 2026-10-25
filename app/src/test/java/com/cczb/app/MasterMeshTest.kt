@@ -58,6 +58,11 @@ class MasterMeshTest {
         assertNull(MasterProtocol.parse("INV_BEGIN epoch=7 req=11 req=12 count=0"))
         val mesh = MasterProtocol.parse("MESH epoch=7 req=11 op=10 scan=10 phase=SCANNING busy=1 capable=1 reason=NONE found=1 target=0000") as MasterMessage.Mesh
         assertTrue(mesh.state.busy); assertEquals(10L, mesh.state.scan)
+        val configuring = MasterProtocol.parse("MESH epoch=7 req=12 op=12 scan=0 phase=CONFIGURING busy=1 capable=1 reason=NONE found=0 target=0002 step=2 attempt=2 retry_wait=1 retry_ms=4900") as MasterMessage.Mesh
+        assertEquals("绑定 AppKey 未收到回复，等待分段清理后重试（第 2/3 次）（约 5 秒）…", configuring.state.label)
+        assertNull(MasterProtocol.parse("MESH epoch=7 req=12 op=12 scan=0 phase=CONFIGURING busy=1 capable=1 reason=NONE found=0 target=0002 retry_ms=12001"))
+        assertEquals("正在绑定密钥和配置 Mesh…", (MasterProtocol.parse("MESH epoch=7 req=13 op=13 scan=0 phase=CONFIGURING busy=1 capable=1 reason=NONE found=0 target=0002") as MasterMessage.Mesh).state.label)
+        assertNull(MasterProtocol.parse("MESH epoch=7 req=13 op=13 scan=0 phase=CONFIGURING busy=1 capable=1 reason=NONE found=0 target=0002 step=6"))
         val uuid = "dddd504d3076f5ba02ce020000000000"
         assertTrue(MasterProtocol.parse("CAND epoch=7 scan=10 uuid=$uuid") is MasterMessage.Candidate)
         assertNull(MasterProtocol.parse("CAND epoch=7 scan=10 uuid=bad"))
@@ -150,9 +155,11 @@ class MasterMeshTest {
         assertTrue(base.canScanMesh)
         assertFalse(base.canJoinMesh)
         val uuid = "dddd504d3076f5ba02ce020000000000"
-        val done = base.copy(mesh = base.mesh!!.copy(phase = "SCAN_DONE", found = 1), candidates = listOf(uuid))
+        val done = base.copy(mesh = base.mesh!!.copy(phase = "SCAN_DONE", found = 1), candidates = listOf(uuid), inventoryFresh = true, slaves = emptyList())
         assertTrue(done.canScanMesh)
         assertTrue(done.canJoinMesh)
+        assertFalse(done.copy(inventoryFresh = false).canJoinMesh)
+        assertFalse(done.copy(slaves = (1..5).map { MasterSlave(it, it + 1L, true, true) }).canJoinMesh)
     }
 
     @Test fun scanActionIsNotBlockedByAnUnrelatedPendingPumpTask() {
