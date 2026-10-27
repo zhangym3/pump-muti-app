@@ -1,5 +1,57 @@
 # APP 验证记录
 
+## 当前测试范围（2026-10-27）
+
+按用户最新说明“此次任务 后续不做真实测试”，后续不再执行真实设备测试或要求接入手机/开发板；代码审查、构建、静态检查和软件单元测试可以继续。下文构建与测试均按各自原有证据记录，未实测项目保留未验，不能以软件检查补为通过。恢复重配继续保持 `recovery_enabled=0`，完整流程尚未实现，G0 与最终验收未通过。
+
+## 2026-10-27：G0 连接诊断与负向测试证据收紧
+
+恢复 GATT 现在区分连接、服务发现、身份读取和业务读写阶段，并区分连接回调状态与 ATT 写回调状态。只有写回调明确返回 ATT `0x08`（Insufficient Authorization）才可作为错误证明/重放被拒绝的证据；超时、GATT 133/147、意外断线、其他 ATT 错误和本地解析失败均判定为证据不足。负向测试先验证设备身份与密码证明，再验证拒绝及合法凭证重新连接。
+
+设备探测使用每次运行独立的 `probeRun`。验收脚本同时要求三项 instrumentation 按顺序实际开始/成功结束、runner 完整结束、本轮全部认证次数、最大帧/重复读取、三项明确拒绝及合法重连日志、独立前后快照和全程软件输出监测。旧轮次日志、缺失/重复轮次或测试 APK 过旧不能补足证据。
+
+本轮 JVM 170 项通过（新增 4 项错误分类测试）；探测证据校验器 14 项通过。Debug APK、测试 APK 和 Lint 构建通过，Lint 0 错误、20 警告。构建日志为任务交付目录中的 `app-gatt-evidence-build-final.log`，证据校验日志为 `auth-probe-evidence-strict-tests.log`。
+
+本轮仍未安装或运行设备测试：ADB 列表、mDNS 和串口列表均为空。日志仅记录阶段、回调类别、数字状态和耗时，不记录认证报文、凭证或 PIN。没有改变认证规则或启用恢复清网，`recovery_enabled=0`；此前 GATT=147 的根因及完整恢复验收仍未解决。
+
+## 2026-10-27：恢复基础与 OOB 承诺阶段候选
+
+这是开发阶段验证记录，完整重新组网、续办及待启用流程尚未实现，不能视为恢复功能已验收。恢复能力继续保持 `recovery_enabled=0`。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| JVM 单元测试 | 166 项，0 失败、0 错误、0 跳过；根据本轮 XML 汇总，含 4 项一次性 OOB 承诺测试 |
+| Debug APK / Android 测试 APK | `assembleDebug`、`assembleDebugAndroidTest` 成功 |
+| Lint | 0 错误、20 警告 |
+| 本轮实机安装 / instrumentation | 未执行；ADB 未上线，自动发现为空 |
+| 主机 / 从机 | 最终 ESP32-S3 / ESP32-C3 构建成功；主机静态 RAM 61,724 B、Flash 1,084,924 B；从机静态 RAM 39,752 B、Flash 1,026,530 B |
+| 共享恢复基础与真实 SDK host harness | 通过；模拟存储故障、真实 mbedTLS、SDK 强制 OOB 分支及 AppKey / 模型容量验证，均不代表空口和真实掉电通过 |
+
+本轮执行命令：
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Java\jdk-21.0.10'
+$env:JAVA_TOOL_OPTIONS='-Djdk.net.unixdomain.tmpdir=C:\Windows\Temp'
+.\gradlew.bat testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug --no-daemon --console=plain
+```
+
+`C:\Windows\Temp` 用于当前终端的 JDK Unix-domain socket 临时路径；没有修改系统网络或产品认证逻辑。证据在任务交付目录 `outputs/mesh-recovery-implementation-20261027/`：`app-attempt-oob-build-uds.log`、`recovery-resource-final-host-tests.log`、`sdk-appkey-capacity-tests.log` 及两份 `*-final-build.log`。阶段候选的确切 SHA256、配置摘要及源码摘要以同目录候选包的 manifest 为准，旧章节哈希不适用于本次构建。
+
+此前单台、30 轮发现测试观察到发现 30/30、读身份 29/30，其中一次 GATT 133。它是既有镜像的局部证据，未覆盖认证、强制 OOB 或恢复闭环。此前认证探测在 GATT 连接阶段失败，不能记作认证通过，也不能据此认定密码协议失败。凭证库的三项设备测试曾通过；新增主机信任库的 Android Provider / Keystore 测试仍待实机执行。
+
+最终预检 `auth-probe-preflight-resource-final/result.json` 明确记录 `accepted=false`、`instrumentationStarted=false`，COM4、COM7 未枚举、ADB 未在线。本轮未刷写、未清网、未操作泵阀。仍缺独立主机管理员认证、运行时准入锁与协调器、逐绑定 AppKey、V7 业务隔离、秘密退休/重试及完整 APP 恢复流程；G0 和方案 T01–T38 均未作完整通过判定。
+
+## 2026-10-26：开发阶段免 PIN 配对
+
+配套 ESP32-S3 主机的 `CONFIG_PUMP_DEV_NO_PIN=y` 使用加密 Just Works 配对；APP 仍等待系统绑定成功、加密 CCCD 订阅和 MTU 协商，更新了连接提示，同时兼容启用六位 PIN 的主机。
+
+- `testDebugUnitTest`、`assembleDebug`、`lintDebug` 均通过；137 项 JVM 单元测试，0 失败、0 错误、0 跳过，包括 6 项配对状态机测试。
+- Lint 为 0 错误、0 Fatal、20 警告；未更改蓝牙配对状态机或业务控制逻辑。
+- Debug APK SHA256：`13a8cc32c6c4c483c954b0e1dc0f3c120b86131d3214778a9416f1c35f1dfcb2`。
+- 构建日志：`build/dev-no-pin-validation.log`；JVM 报告：`app/build/reports/tests/testDebugUnitTest/index.html`；Lint：`app/build/reports/lint-results-debug.html`。
+
+本轮未安装 APK、未执行设备刷写或实机蓝牙配对。仍需验证免 PIN 首次配对、已绑定重连和取消配对；若旧绑定失效，仅忘记对应 Master 后重试，不清空 Mesh 网络或设备 NVS。
+
 ## APP 1.2.2：单台删除从机
 
 2026-10-21，包名 `com.cczb.app`，versionCode 10。新增设备页「删除 → 确认删除」、旧固件能力门控、目标/请求精确匹配、离线结果提示、超时不重发以及任务地址快照保存。

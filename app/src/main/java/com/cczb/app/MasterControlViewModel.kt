@@ -43,7 +43,7 @@ data class MasterUiState(
     val calibration: MasterCalibration = MasterCalibration(),
     val flowCalibration: FlowCalibrationSession? = null,
     val history: List<MasterHistoryEntry> = emptyList(), val historyHealthy: Boolean = true,
-    val message: String = "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统 PIN 配对。",
+    val message: String = "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统蓝牙配对。",
     val log: List<String> = emptyList()
 ) {
     val savedTaskObservation: MasterHistoryEntry? get() = task?.let {
@@ -87,7 +87,8 @@ data class MasterUiState(
     } == true
     val canStopFlowCalibration get() = connected && hello?.role == "PUMP_MASTER" && flowCalibration?.canStop == true
     val canQueryFlowCalibration get() = connected && hello?.role == "PUMP_MASTER" && flowCalibration != null
-    val managementBusy get() = meshPending || mesh?.busy == true
+    val removalUnconfirmed get() = mesh?.phase == "REMOVE_PENDING"
+    val managementBusy get() = meshPending || mesh?.busy == true || removalUnconfirmed
     val meshBudgetMessage: String? get() {
         val budget = meshBudget ?: return null
         if (!connected || !meshFresh || budget.epoch != hello?.epoch || budget.operation != mesh?.operation) return null
@@ -117,7 +118,8 @@ data class MasterUiState(
         !meshFresh -> "组网状态待同步，请刷新后重试。"
         mesh?.capable != true -> "主机 Mesh Provisioner 当前不可用，请检查主机状态。"
         mesh.supportsRemoval != true -> "当前主机固件不支持单台删除，请先更新主机固件。"
-        managementBusy -> "主机正在执行组网操作，请等待完成。"
+        removalUnconfirmed && mesh?.target != node.address -> "请先完成原设备的待确认退网。"
+        managementBusy && !removalUnconfirmed -> "主机正在执行组网操作，请等待完成。"
         !storageHealthy -> "主机存储状态异常，暂不能删除从机。"
         !historyHealthy -> "APP 任务历史状态异常，请先检查历史记录。"
         flowCalibrationLocked -> "计量校准正在执行或待确认，请先停止并完成对账。"
@@ -281,6 +283,7 @@ data class MasterUiState(
         hello.fault != "NONE" -> "主机故障：${hello.fault}，请现场检查"
         localFresh && local != null && local.fault != "NONE" -> "水泵故障：${local.fault}，请现场检查"
         !hello.ready -> "主机尚未就绪"
+        removalUnconfirmed -> "从机退网待确认，请到设备页重试原设备退网"
         managementBusy -> "主机正在扫描或组网，请等待完成"
         !inventoryFresh || slaves == null -> "从机清单待同步，请刷新"
         selectableMask == 0L -> "没有在线且已配置的从机，请到设备页扫描组网并完成现场配置"
@@ -307,11 +310,12 @@ data class MasterUiState(
         maintenance?.locked == true -> "维护许可未退出，禁止启动水泵"
         flowCalibrationLocked -> "计量校准正在执行或待确认，请先停止并完成对账"
         calibration.pending != null -> "计量调校待主机确认，请稍候"
-        !connected -> "请先连接 PUMP_MASTER 主机，并完成系统 PIN 配对"
+        !connected -> "请先连接 PUMP_MASTER 主机，并完成系统蓝牙配对"
         hello == null || !statusFresh -> "正在核实主机状态，请刷新"
         hello.role != "PUMP_MASTER" -> "当前连接的是从机，请连接 PUMP_MASTER 主机"
         !localFresh || local == null -> "水泵状态未同步，请刷新"
         !local.testSupported -> "主机固件不支持独立试泵，请更新固件"
+        removalUnconfirmed -> "从机退网待确认，请到设备页重试原设备退网"
         managementBusy -> "主机正在扫描或组网，请等待完成"
         !hello.commissioned -> "水泵输出尚未启用，请现场核实接线并配置 commissioned"
         local.fault == "BOOT_LOCK" && !manualTestSupported -> "当前固件启动锁定；请更新主机固件并重新连接"
@@ -544,7 +548,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
             pumpTest = ledger?.pumpTests?.get(address), testStopPending = false, testMessage = "正在同步原测试状态；不会自动重新启动",
             task = savedTask, masterAddress = address, taskAddresses = emptyMap(), removal = null,
             deviceName = device.advertisedName ?: "Master ${address}", retryDevice = device,
-            message = "正在连接；请完成系统 PIN 配对").restoreTaskObservation()
+            message = "正在连接；请完成系统蓝牙配对").restoreTaskObservation()
         state.value = if (restoredState.taskResultsComplete)
             restoredState.copy(message = "正在连接；已恢复本机保存的完整任务结果") else restoredState
         manager.connect(device.device)
@@ -765,7 +769,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
     }
     fun resetMesh() {
         if (!state.value.canResetMesh) return
-        state.value = state.value.copy(meshPending = true, meshMessage = "已发送重置请求，等待 Master 清除从机并重启")
+        state.value = state.value.copy(meshPending = true, meshMessage = "已请求仅清主机登记及分档标定，等待主机重启；从机原网络不会清除")
         manager.sendCommand("mesh-reset CONFIRM")
     }
     fun removeSlave(address: Long) {
@@ -1032,7 +1036,7 @@ class MasterControlViewModel(application: Application) : AndroidViewModel(applic
                         state.value.calibration.address == removal.address)
                         MasterCalibration() else state.value.calibration,
                     candidates = emptyList(), meshMessage = parsed.state.label)
-                if (finishedRemoval || old?.phase != parsed.state.phase && parsed.state.phase in setOf("READY", "FAILED", "REMOVE_DONE")) {
+                if (finishedRemoval || old?.phase != parsed.state.phase && parsed.state.phase in setOf("READY", "FAILED", "REMOVE_DONE", "REMOVE_PENDING")) {
                     state.value = state.value.copy(inventoryFresh = false)
                     requestInventory(force = true)
                 }

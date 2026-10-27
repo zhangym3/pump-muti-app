@@ -91,6 +91,26 @@ class MasterRemovalTest {
         }
     }
 
+    @Test fun unconfirmedResetKeepsTheDeviceAndAllowsAnExplicitRetry() {
+        val removal = MasterRemoval(7, 11, 10, 9)
+        val update = MasterMessage.Mesh(7, 19, mesh.copy(phase = "REMOVE_PENDING",
+            reason = "REMOTE_UNCONFIRMED", operation = 11, target = 10))
+        val pending = removal.receive(update)
+        assertFalse(pending.succeeded)
+        assertFalse(pending.pending)
+        assertTrue(pending.message.contains("已保留"))
+        assertTrue(ui.copy(mesh = update.state, removal = pending).canRemoveSlave(node))
+        val waiting = ui.copy(mesh = update.state, removal = pending)
+        assertFalse(waiting.canScanMesh)
+        assertFalse(waiting.canResetMesh)
+        assertFalse(waiting.canStart)
+        assertFalse(waiting.canStartTest)
+        assertFalse(waiting.canSetSpeed)
+        val other = node.copy(slot = 8, address = 11)
+        assertFalse(waiting.copy(slaves = listOf(node, other)).canRemoveSlave(other))
+        assertEquals(removal, removal.receive(update.copy(state = update.state.copy(target = 12))))
+    }
+
     @Test fun removingOrReusingATaskSlotDoesNotReopenCompletedResultReconciliation() {
         val job = MasterJobKey(7, 1)
         val task = MasterTask("a1", 42, 7, 0x100, 500, 60_000, MasterOutcome.FINISHED, job)

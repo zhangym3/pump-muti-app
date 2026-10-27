@@ -121,7 +121,7 @@ class MasterBleManager(private val context: Context, private val listener: Liste
                         }
                         BluetoothDevice.ACTION_PAIRING_REQUEST -> {
                             val variant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
-                            trace("BLE 系统配对请求：variant=$variant，请在系统窗口输入主机六位 PIN；未弹窗时查看通知栏")
+                            trace("BLE 系统配对请求：variant=$variant，请按系统提示完成；开发版无需 PIN，启用 PIN 的主机需输入六位数字")
                             // Observe only. Android owns the dialog and PIN entry.
                         }
                     }
@@ -140,9 +140,9 @@ class MasterBleManager(private val context: Context, private val listener: Liste
         if (source !== gatt) return
         when (action) {
             MasterPairingGate.Action.WAIT -> Unit
-            MasterPairingGate.Action.FAIL -> fail("PIN 配对失败或已取消，请输入主机当前六位 PIN 后重试；已更换固件或 PIN 时请仅忘记该 Master 的旧配对")
+            MasterPairingGate.Action.FAIL -> fail("蓝牙配对失败或已取消，请按系统提示重试；更换固件或 PIN 后若旧绑定失效，请仅忘记该 Master 的旧配对")
             MasterPairingGate.Action.REQUEST_BOND -> {
-                trace("BLE 主机尚未触发配对，APP 请求系统 PIN 配对")
+                trace("BLE 主机尚未触发配对，APP 请求系统蓝牙配对")
                 val started = source.device.createBond()
                 val current = bondState(source.device)
                 if (!started && current == MasterPairingGate.Bond.NONE) {
@@ -168,10 +168,10 @@ class MasterBleManager(private val context: Context, private val listener: Liste
 
     private fun awaitBonding(source: BluetoothGatt) {
         val state = bondState(source.device)
-        trace("BLE 已连接：${source.device.address} bond=$state；首次连接请完成系统 PIN 配对")
+        trace("BLE 已连接：${source.device.address} bond=$state；首次连接请完成系统蓝牙配对")
         handlePairing(source, pairing.connected(state))
         val expectedEpoch = epoch
-        // Master requests MITM encryption on connect. Avoid competing pairing requests.
+        // Master requests encryption on connect. Avoid competing pairing requests.
         handler.postDelayed({
             if (epoch != expectedEpoch || source !== gatt || discovering) return@postDelayed
             try { handlePairing(source, pairing.fallback(bondState(source.device))) }
@@ -276,7 +276,7 @@ class MasterBleManager(private val context: Context, private val listener: Liste
                 if (gatt == null) { fail("蓝牙连接未能启动"); return@postDelayed }
                 handler.postDelayed({
                     if (epoch == expectedEpoch && gatt != null && !ready)
-                        fail("连接超时，请完成系统 PIN 配对，并检查 Master 控制服务")
+                        fail("连接超时，请完成系统蓝牙配对，并检查 Master 控制服务")
                 }, 90_000)
             } catch (_: SecurityException) { fail("蓝牙权限已被撤销，请重新授权") }
               catch (_: IllegalStateException) { fail("蓝牙连接无法启动，请重新打开蓝牙") }
@@ -386,7 +386,7 @@ class MasterBleManager(private val context: Context, private val listener: Liste
     private fun discover(source: BluetoothGatt) {
         if (discovering || source !== gatt) return
         if (source.device.bondState != BluetoothDevice.BOND_BONDED) {
-            fail("系统 PIN 配对尚未完成，请完成配对后重试")
+            fail("系统蓝牙配对尚未完成，请完成配对后重试")
             return
         }
         discovering = true
@@ -484,8 +484,8 @@ class MasterBleManager(private val context: Context, private val listener: Liste
                     .ifEmpty { "无" }
                 trace("BLE 实际发现服务：$discovered")
                 fail(
-                    "未找到 Master 控制服务。请确认主机已配置六位 PIN 并重启；" +
-                        "若已设置 PIN，请清除系统蓝牙配对后重试"
+                    "未找到 Master 控制服务。请确认主机固件已启用手机控制；" +
+                        "启用 PIN 时需先配置六位 PIN 并重启；旧绑定失效时仅忘记该主机后重试"
                 )
                 return@receive
             }
@@ -502,8 +502,8 @@ class MasterBleManager(private val context: Context, private val listener: Liste
             val cccd = tx.getDescriptor(CCCD_UUID)
             if (cccd == null) { fail("状态通道缺少 CCCD 描述符"); return@receive }
             val value = if (notify) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE else BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            // Bonding has completed. Protected CCCD success verifies authenticated encryption.
-            trace("BLE 写入加密 CCCD，验证主机认证与通知通道")
+            // Bonding has completed. Protected CCCD success verifies the firmware's required encryption.
+            trace("BLE 写入加密 CCCD，验证主机连接与通知通道")
             val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeDescriptor(cccd, value) == BluetoothStatusCodes.SUCCESS
             } else {
@@ -512,14 +512,14 @@ class MasterBleManager(private val context: Context, private val listener: Liste
                 @Suppress("DEPRECATION")
                 gatt.writeDescriptor(cccd)
             }
-            if (!started) fail("通知订阅请求失败，请完成系统 PIN 配对后重连")
+            if (!started) fail("通知订阅请求失败，请完成系统蓝牙配对后重连")
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) = receive(gatt) {
             if (descriptor.uuid != CCCD_UUID || descriptor.characteristic.uuid != TX_UUID) return@receive
             trace("BLE 加密 CCCD 回调：GATT=$status bond=${bondState(gatt.device)}")
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                fail("通知订阅失败：GATT=$status，请完成六位 PIN 配对后重连"); return@receive
+                fail("通知订阅失败：GATT=$status，请完成系统蓝牙配对后重连"); return@receive
             }
             if (!subscribed) {
                 subscribed = true

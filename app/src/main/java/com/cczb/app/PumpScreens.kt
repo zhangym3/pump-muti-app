@@ -377,7 +377,7 @@ internal fun SlaveRemovalConfirmation(ui: MasterUiState, address: Long, alias: (
     val name = target?.takeIf { it.slot > 0 }?.let { alias(it.slot) } ?: "待配置从机"
     AlertDialog(onDismissRequest = onDismiss, title = { Text("确认删除从机") },
         text = { Text(buildString {
-            append("删除 $name（${addressLabel(address)}）后，将清除主机保存的该从机连接、登记和调校数据。主机会尝试通知从机退网；若从机离线或无回复，重新添加前需在从机本地清除 Mesh。")
+            append("主机将请求 $name（${addressLabel(address)}）退网，收到确认后删除登记及低/中/高档标定。未收到确认时保留连接凭据并显示“退网待确认”，可在设备恢复通信后重试。待退网期间禁止启动新任务。旧主机固件仍可能直接删除本地记录，请先升级主机。")
             target?.let { ui.slaveRemovalBlockReason(it)?.let { reason -> append("\n\n当前无法删除：$reason") } }
         }) },
         confirmButton = { TextButton(onClick = { if (target != null && ui.canRemoveSlave(target)) onConfirm(address) },
@@ -456,7 +456,7 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
             Supporting("离线或待启用配置的阀门不能执行出水任务。")
         if (ui.commissionMessage.isNotEmpty()) Feedback(ui.commissionMessage)
         ui.removal?.let { Feedback(it.message) }
-        if (ui.removal == null && ui.mesh?.phase in setOf("REMOVING", "REMOVE_CLEANUP", "REMOVE_DONE"))
+        if (ui.removal == null && ui.mesh?.phase in setOf("REMOVING", "REMOVE_PENDING", "REMOVE_CLEANUP", "REMOVE_DONE"))
             Feedback(ui.meshMessage)
         if (ui.connected && ui.meshFresh && ui.mesh?.supportsRemoval == false && !ui.slaves.isNullOrEmpty())
             Supporting("单台删除需要更新主机固件。")
@@ -467,9 +467,9 @@ internal fun DevicesScreen(ui: MasterUiState, alias: (Int) -> String, onRename: 
     if (showMaintenance) {
         OutlinedButton(onClick = onResetMesh, enabled = ui.canResetMesh && !ui.meshPending,
             modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
-            Text(if (ui.meshPending && ui.mesh?.phase == "RESETTING") "正在重置…" else "重置从机组网")
+            Text(if (ui.meshPending && ui.mesh?.phase == "RESETTING") "正在清主机登记…" else "高级：仅清主机登记")
         }
-        Supporting("重置会清除主机保存的全部从机连接信息，并自动重启。")
+        Supporting("清主机登记不会让从机退网；会删除全部从机登记及分档标定。请优先逐台删除并确认退网。")
     }
 }
 
@@ -595,10 +595,12 @@ internal fun SettingsScreen(ui: MasterUiState, seconds: String, onSeconds: (Stri
     }
     if (ui.caps?.basic != true || ui.flowCalibrationLocked) CalibrationSettings(ui, alias, onSelectCalibration, onReadCalibration, onStartFlowCalibration,
         onMarkFlowCalibration, onStopFlowCalibration, onQueryFlowCalibration, onSaveFlowCalibration)
+    RecoveryVaultPanel()
     TextButton(onClick = { advanced = !advanced }) {
         Text(if (advanced) "收起高级设置" else "高级设置与诊断")
     }
     if (advanced) {
+        RecoveryMasterTrustPanel()
         Supporting("手机固定连接主机；从机组网和设备维护请到“设备”页操作。")
         TextButton(onClick = { diagnostics = !diagnostics }) {
             Text(if (diagnostics) "收起连接诊断" else "查看连接诊断")

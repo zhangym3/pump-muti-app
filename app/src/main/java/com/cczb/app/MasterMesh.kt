@@ -72,7 +72,8 @@ data class MasterMeshState(
         "READY" -> "从机组网成功"
         "CANCELLING" -> "正在结束超时的配对…"
         "RESETTING" -> "正在清除全部从机连接…"
-        "RESET_DONE" -> "从机组网已重置"
+        "RESET_DONE" -> "主机登记已清除；从机原 Mesh 配置未被清除"
+        "REMOVE_PENDING" -> "退网待确认：连接凭据与标定已保留；请让从机恢复通信后重试删除。待退网期间禁止新任务。"
         "REMOVING", "REMOVE_CLEANUP" -> "正在删除从机 ${addressLabel(target)}…"
         "REMOVE_DONE" -> if (reason == "REMOTE_RESET") "从机已删除，已收到退网确认"
             else "从机已从主机删除；未确认从机退网，重新添加前请在从机本地清除 Mesh"
@@ -104,7 +105,7 @@ data class MasterRemoval(
         if (succeeded || update.epoch != epoch || mesh.operation != request || mesh.target != address) return this
         return when (mesh.phase) {
             "REMOVE_DONE" -> copy(pending = false, succeeded = true, message = mesh.label)
-            "FAILED" -> copy(pending = false, message = mesh.label)
+            "FAILED", "REMOVE_PENDING" -> copy(pending = false, message = mesh.label)
             "REMOVING", "REMOVE_CLEANUP" -> copy(message = mesh.label)
             else -> this
         }

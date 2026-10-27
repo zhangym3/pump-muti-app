@@ -109,12 +109,12 @@ internal fun PumpApp(model: MasterControlViewModel) {
     }
     if (confirmMeshReset) AlertDialog(
         onDismissRequest = { confirmMeshReset = false },
-        title = { Text("确认重置从机组网") },
-        text = { Text("主机会清除所有已保存的 Mesh 从机连接和从机登记信息，并自动重启。主机 PIN、泵设置和任务记录会保留。重置后需要重新点击“添加设备”完成组网。") },
+        title = { Text("确认仅清主机登记") },
+        text = { Text("此高级维护操作会删除主机保存的全部从机连接、登记及低/中/高档标定，并自动重启。不会通知从机退网：从机仍可能保留旧 Mesh 配置，因此“添加设备”可能无法找到它。请先保存恢复凭证与标定资料；不支持 APP 恢复的旧从机需要现场维护。主机 PIN、泵设置和任务记录会保留。") },
         confirmButton = { TextButton(onClick = {
             confirmMeshReset = false
             model.resetMesh()
-        }, enabled = ui.canResetMesh && !ui.meshPending) { Text("确认重置") } },
+        }, enabled = ui.canResetMesh && !ui.meshPending) { Text("确认仅清登记") } },
         dismissButton = { TextButton(onClick = { confirmMeshReset = false }) { Text("取消") } }
     )
     if (commissionSlot != 0) {
@@ -223,7 +223,7 @@ internal fun PumpApp(model: MasterControlViewModel) {
                             if (ui.connected && ui.hello?.fault == "BOOT_LOCK") {
                                 OutlinedButton(onClick = openPump, modifier = Modifier.fillMaxWidth()) { Text("查看并解除主机启动锁") }
                             }
-                            if (ui.message != "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统 PIN 配对。" && ui.message != "主控已连接") Feedback(ui.message)
+                            if (ui.message != "扫描并连接 PUMP_MASTER 设备；首次连接请完成系统蓝牙配对。" && ui.message != "主控已连接") Feedback(ui.message)
                             TaskComposer(ui, mask, amount, seconds, individual, valveAmounts, alias,
                                 onMask = { mask = it }, onAmount = { amount = it }, onMode = { individual = it },
                                 onValveAmount = { slot, value -> valveAmounts = ArrayList(valveAmounts).also { it[slot - 1] = value } },
@@ -286,12 +286,12 @@ private fun ConnectionSheet(ui: MasterUiState, model: MasterControlViewModel, on
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("连接主机", style = MaterialTheme.typography.headlineSmall)
-            Supporting("Master 是 BLE GATT 设备，部分手机系统蓝牙列表可能不显示；请在这里扫描。首次连接时在 Android 系统窗口输入六位 PIN，未弹窗时请查看通知栏。")
+            Supporting("请在这里扫描并连接主机。首次连接如出现系统蓝牙配对请求，请确认；启用 PIN 的主机需输入六位 PIN，开发版无需输入。")
             Feedback(ui.message)
             (ui.connection as? MasterConnectionState.Error)?.let { Feedback(it.message) }
             if (ui.connected || connecting) {
                 Text(ui.deviceName)
-                Feedback(if (connecting) "正在连接与配对，请留意系统 PIN 窗口。" else "蓝牙已连接，主机业务状态请查看控制页。")
+                Feedback(if (connecting) "正在连接与配对，请留意系统蓝牙提示。" else "蓝牙已连接，主机业务状态请查看控制页。")
                 OutlinedButton(onClick = model.manager::disconnect, modifier = Modifier.fillMaxWidth()) { Text("断开蓝牙") }
             } else {
                 Button(onClick = {
